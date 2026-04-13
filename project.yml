@@ -1,0 +1,12 @@
+packages:
+  - name: intercom
+    environment:
+      INTERCOM_ACCESS_TOKEN: ${INTERCOM_ACCESS_TOKEN}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+    functions:
+      - name: lead-to-user
+        runtime: python:3.12
+        web: raw
+        limits:
+          timeout: 15000
+          memory: 256

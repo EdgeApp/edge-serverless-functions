@@ -1,0 +1,14 @@
+{
+  "type": "notification_event",
+  "topic": "contact.lead.created",
+  "data": {
+    "type": "notification_event_data",
+    "item": {
+      "type": "contact",
+      "id": "lead_abc123",
+      "role": "lead",
+      "email": "jane@example.com",
+      "name": "Jane Doe"
+    }
+  }
+}
