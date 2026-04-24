@@ -24,6 +24,25 @@ address. Listens to three webhook topics:
    - Merges the lead into the user (lead is deleted)
 4. Returns 200 so Intercom does not retry
 
+### `intercom/call-timezone` — Inbound Call Timezone Inference
+
+Automatically infers a caller's timezone when an inbound call starts in
+Intercom. Listens to the **`call.started`** webhook topic and filters to
+inbound calls only.
+
+**How it works:**
+
+1. Intercom fires a `call.started` webhook for an inbound call
+2. The function verifies the HMAC-SHA1 signature
+3. Parses the caller's E.164 phone number with `phonenumbers` (Google's
+   libphonenumber) to determine country and timezone
+4. For US/CA numbers, uses the 3-digit area code to narrow to a specific
+   timezone
+5. Creates an internal note on the contact with timezone details (visible in
+   all Inbox views)
+6. Sets an `inferred_timezone` custom attribute on the contact (filterable,
+   usable in reports)
+
 ## Project Structure
 
 ```
@@ -33,11 +52,17 @@ edge-serverless-functions/
 ├── README.md
 └── packages/
     └── intercom/
-        ├── lead-to-user/                   # Deployed function code
+        ├── lead-to-user/                   # Lead-to-user auto-converter
         │   ├── __main__.py                # Entry point
         │   ├── intercom_client.py         # Intercom API client
         │   ├── requirements.txt           # Python dependencies
         │   └── build.sh                   # Dependency installer for DO
+        ├── call-timezone/                  # Inbound call timezone inference
+        │   ├── __main__.py                # Webhook handler (call.started)
+        │   ├── timezone.py                # Phone → timezone inference
+        │   ├── intercom_client.py         # Note + attribute API client
+        │   ├── requirements.txt
+        │   └── build.sh
         └── tests/                         # Dev/test (not deployed)
             ├── test_webhook.py            # Test suite (pytest)
             ├── test_payload.json          # Sample webhook payload

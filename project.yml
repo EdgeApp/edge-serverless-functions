@@ -10,3 +10,9 @@ packages:
         limits:
           timeout: 15000
           memory: 256
+      - name: call-timezone
+        runtime: python:3.12
+        web: raw
+        limits:
+          timeout: 15000
+          memory: 256
