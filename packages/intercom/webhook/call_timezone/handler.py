@@ -1,42 +1,18 @@
-"""Webhook handler for Intercom call.started events.
+"""Inbound call timezone inference handler.
 
 Infers the caller's timezone from their phone number, then:
-1. Creates an internal note on the conversation/ticket with timezone details
-2. Sets the `inferred_timezone` custom attribute on the contact
+1. Creates an internal note on the conversation with timezone details
+2. Sets the ``inferred_timezone`` custom attribute on the contact
+
+Called by the webhook router for the call.started topic.
 """
 
-import base64
-import hashlib
-import hmac
-import json
 import logging
-import os
 
-from timezone import infer_timezone
+from call_timezone.timezone import infer_timezone
 from intercom_client import create_conversation_note, update_contact_attributes
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
-
-def _get_raw_body(event):
-    http = event.get("http", {})
-    body = http.get("body", "")
-    if http.get("isBase64Encoded"):
-        body = base64.b64decode(body).decode("utf-8")
-    return body
-
-
-def _verify_signature(raw_body, signature_header, secret):
-    if not signature_header:
-        return False
-    expected = hmac.new(
-        secret.encode("utf-8"),
-        raw_body.encode("utf-8"),
-        hashlib.sha1,
-    ).hexdigest()
-    provided = signature_header.removeprefix("sha1=")
-    return hmac.compare_digest(expected, provided)
 
 
 def _build_note_body(info: dict, phone: str) -> str:
@@ -64,27 +40,8 @@ def _build_note_body(info: dict, phone: str) -> str:
     return "<br>".join(lines)
 
 
-def main(event, context):
-    raw_body = _get_raw_body(event)
-
-    headers = event.get("http", {}).get("headers", {})
-    secret = os.environ.get("WEBHOOK_SECRET", "")
-
-    if not _verify_signature(raw_body, headers.get("x-hub-signature"), secret):
-        logger.warning("Invalid or missing HMAC signature")
-        return {"statusCode": 401, "body": "Invalid signature"}
-
-    try:
-        payload = json.loads(raw_body)
-    except (json.JSONDecodeError, TypeError):
-        logger.warning("Malformed JSON body")
-        return {"statusCode": 400, "body": "Malformed body"}
-
-    topic = payload.get("topic", "")
-    if topic != "call.started":
-        logger.info("Ignoring topic: %s", topic)
-        return {"statusCode": 200, "body": "Ignored"}
-
+def handle(payload):
+    """Process a call.started webhook payload. Expects a pre-verified, parsed dict."""
     item = payload.get("data", {}).get("item", {})
 
     if item.get("direction") != "inbound":

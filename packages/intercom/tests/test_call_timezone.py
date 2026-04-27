@@ -9,15 +9,15 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-FUNC_DIR = os.path.join(os.path.dirname(__file__), "..", "call-timezone")
+FUNC_DIR = os.path.join(os.path.dirname(__file__), "..", "webhook")
 sys.path.insert(0, FUNC_DIR)
 
 import intercom_client as tz_intercom_client
-import timezone as tz_module
+from call_timezone import timezone as tz_module
 
-spec = importlib.util.spec_from_file_location("call_tz_handler", os.path.join(FUNC_DIR, "__main__.py"))
+spec = importlib.util.spec_from_file_location("webhook_router", os.path.join(FUNC_DIR, "__main__.py"))
 handler = importlib.util.module_from_spec(spec)
-sys.modules["call_tz_handler"] = handler
+sys.modules["webhook_router"] = handler
 spec.loader.exec_module(handler)
 
 WEBHOOK_SECRET = "test-secret-key"
@@ -255,16 +255,14 @@ class TestHandlerFlow:
         assert result["statusCode"] == 200
         assert result["body"] == "OK"
 
-        # Note was created on the conversation
         assert mock_post.call_count == 1
         note_call = mock_post.call_args
-        assert "conv_123" in note_call[0][0]  # URL contains conversation_id
+        assert "conv_123" in note_call[0][0]
         assert note_call[1]["json"]["message_type"] == "note"
         note_body = note_call[1]["json"]["body"]
         assert "America/" in note_body
         assert "212" in note_body
 
-        # Custom attribute was set
         assert mock_put.call_count == 1
         attr_call = mock_put.call_args
         assert "ctc_1" in attr_call[0][0]

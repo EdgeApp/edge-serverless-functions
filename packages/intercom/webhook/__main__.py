@@ -1,3 +1,10 @@
+"""Intercom webhook router.
+
+Single entry point for all Intercom webhook topics. Verifies the
+HMAC-SHA1 signature once, then dispatches to the appropriate handler
+based on the ``topic`` field in the payload.
+"""
+
 import base64
 import hashlib
 import hmac
@@ -5,10 +12,18 @@ import json
 import logging
 import os
 
-from intercom_client import search_users_by_email, create_user, merge_lead_into_user
-
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+LEAD_TOPICS = {
+    "contact.lead.created",
+    "contact.lead.added_email",
+    "contact.email.updated",
+}
+
+CALL_TOPICS = {
+    "call.started",
+}
 
 
 def _get_raw_body(event):
@@ -34,6 +49,10 @@ def _verify_signature(raw_body, signature_header, secret):
 
 
 def main(event, context):
+    method = event.get("http", {}).get("method", "").upper()
+    if method == "HEAD":
+        return {"statusCode": 200, "body": ""}
+
     raw_body = _get_raw_body(event)
 
     headers = event.get("http", {}).get("headers", {})
@@ -47,35 +66,18 @@ def main(event, context):
         payload = json.loads(raw_body)
     except (json.JSONDecodeError, TypeError):
         logger.warning("Malformed JSON body")
-        return {"statusCode": 401, "body": "Malformed body"}
+        return {"statusCode": 400, "body": "Malformed body"}
 
-    item = payload.get("data", {}).get("item", {})
-    role = item.get("role")
-    email = item.get("email")
-    lead_id = item.get("id")
-    name = item.get("name")
+    topic = payload.get("topic", "")
+    logger.info("Received webhook topic: %s", topic)
 
-    if role != "lead" or not email:
-        logger.info("Skipping: role=%s, email=%s", role, email)
-        return {"statusCode": 200, "body": "Skipped"}
+    if topic in LEAD_TOPICS:
+        from lead_to_user.handler import handle as handle_lead_to_user
+        return handle_lead_to_user(payload)
 
-    try:
-        users = search_users_by_email(email)
+    if topic in CALL_TOPICS:
+        from call_timezone.handler import handle as handle_call_timezone
+        return handle_call_timezone(payload)
 
-        if users:
-            user_id = users[0]["id"]
-            logger.info("Found existing user %s for %s", user_id, email)
-        else:
-            new_user = create_user(email, name)
-            user_id = new_user["id"]
-
-        result = merge_lead_into_user(lead_id, user_id)
-        if result:
-            logger.info("Conversion complete: lead %s → user %s", lead_id, user_id)
-        else:
-            logger.info("Lead %s was already merged", lead_id)
-
-    except Exception:
-        logger.exception("Error converting lead %s (%s)", lead_id, email)
-
-    return {"statusCode": 200, "body": "OK"}
+    logger.info("Unhandled topic: %s", topic)
+    return {"statusCode": 200, "body": "Ignored"}

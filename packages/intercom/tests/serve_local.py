@@ -1,7 +1,7 @@
 """
 Local development server that simulates the DO Functions runtime.
 
-Wraps the webhook handler in a simple HTTP server so you can test
+Wraps the unified webhook router in a simple HTTP server so you can test
 end-to-end with real Intercom webhooks via a tunnel (ngrok, etc).
 
 Usage:
@@ -22,12 +22,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lead-to-user"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "webhook"))
 
 import importlib.util
 spec = importlib.util.spec_from_file_location(
-    "webhook_handler",
-    os.path.join(os.path.dirname(__file__), "..", "lead-to-user", "__main__.py"),
+    "webhook_router",
+    os.path.join(os.path.dirname(__file__), "..", "webhook", "__main__.py"),
 )
 handler_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(handler_module)
@@ -50,7 +50,15 @@ class WebhookHandler(BaseHTTPRequestHandler):
         computed = hmac.new(
             secret.encode("utf-8"), raw_body.encode("utf-8"), hashlib.sha1
         ).hexdigest()
+
+        try:
+            payload = json.loads(raw_body)
+            topic = payload.get("topic", "(unknown)")
+        except Exception:
+            topic = "(parse error)"
+
         print(f"\n── DEBUG ──────────────────────────────────")
+        print(f"  Topic:         {topic}")
         print(f"  Received sig:  {sig_header}")
         print(f"  Computed sig:  sha1={computed}")
         print(f"  Secret (len):  {len(secret)} chars")
@@ -74,6 +82,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
         if isinstance(body, dict):
             body = json.dumps(body)
 
+        print(f"  → Response: {status} {body}\n")
+
         self.send_response(status)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
@@ -83,7 +93,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Intercom webhook handler is running. POST to this URL.")
+        self.wfile.write(b"Intercom webhook router is running. POST to this URL.")
 
 
 def run(port=8080):
@@ -100,12 +110,16 @@ def run(port=8080):
     server = HTTPServer(("0.0.0.0", port), WebhookHandler)
     print(f"Local webhook server running on http://localhost:{port}")
     print()
+    print("Handles all topics via the unified router:")
+    print("  - contact.lead.created, contact.lead.added_email, contact.email.updated")
+    print("  - call.started")
+    print()
     print("Next steps:")
     print(f"  1. In another terminal: ngrok http {port}")
     print("  2. Copy the ngrok https URL")
-    print("  3. Paste it into Intercom > Settings > Webhooks as the endpoint")
-    print("  4. Subscribe to contact.lead.created, contact.lead.added_email, contact.email.updated")
-    print("  5. Create a lead in Intercom — watch this terminal for logs")
+    print("  3. Paste it into Intercom > Developer Hub > Webhooks as the endpoint")
+    print("  4. Subscribe to the topics above")
+    print("  5. Trigger a webhook — watch this terminal for logs")
     print()
     print("Press Ctrl+C to stop.\n")
     try:

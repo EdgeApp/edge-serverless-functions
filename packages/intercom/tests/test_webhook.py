@@ -9,7 +9,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-FUNC_DIR = os.path.join(os.path.dirname(__file__), "..", "lead-to-user")
+FUNC_DIR = os.path.join(os.path.dirname(__file__), "..", "webhook")
 sys.path.insert(0, FUNC_DIR)
 
 import intercom_client
@@ -23,10 +23,11 @@ WEBHOOK_SECRET = "test-secret-key"
 INTERCOM_TOKEN = "fake-token"
 
 
-def _make_payload(role="lead", email="jane@example.com", name="Jane Doe", lead_id="lead_abc123"):
+def _make_payload(role="lead", email="jane@example.com", name="Jane Doe",
+                  lead_id="lead_abc123", topic="contact.lead.created"):
     return {
         "type": "notification_event",
-        "topic": "contact.created",
+        "topic": topic,
         "data": {
             "type": "notification_event_data",
             "item": {
@@ -162,6 +163,54 @@ class TestSignatureVerification:
         assert result["statusCode"] == 200
 
 
+# ── Topic routing ───────────────────────────────────────────────────
+
+
+class TestTopicRouting:
+    def test_unhandled_topic_returns_ignored(self):
+        payload = _make_payload(topic="conversation.created")
+        event = _make_event(payload)
+        result = handler.main(event, None)
+        assert result["statusCode"] == 200
+        assert result["body"] == "Ignored"
+
+    def test_lead_created_topic_dispatches(self):
+        event = _make_event(_make_payload(topic="contact.lead.created"))
+        with patch("intercom_client.requests.post") as mock_post:
+            mock_post.side_effect = [
+                _mock_search([]),
+                _mock_create("user_1", "jane@example.com"),
+                _mock_merge("user_1", "jane@example.com"),
+            ]
+            result = handler.main(event, None)
+        assert result["statusCode"] == 200
+        assert result["body"] == "OK"
+
+    def test_lead_added_email_topic_dispatches(self):
+        event = _make_event(_make_payload(topic="contact.lead.added_email"))
+        with patch("intercom_client.requests.post") as mock_post:
+            mock_post.side_effect = [
+                _mock_search([]),
+                _mock_create("user_1", "jane@example.com"),
+                _mock_merge("user_1", "jane@example.com"),
+            ]
+            result = handler.main(event, None)
+        assert result["statusCode"] == 200
+        assert result["body"] == "OK"
+
+    def test_email_updated_topic_dispatches(self):
+        event = _make_event(_make_payload(topic="contact.email.updated"))
+        with patch("intercom_client.requests.post") as mock_post:
+            mock_post.side_effect = [
+                _mock_search([]),
+                _mock_create("user_1", "jane@example.com"),
+                _mock_merge("user_1", "jane@example.com"),
+            ]
+            result = handler.main(event, None)
+        assert result["statusCode"] == 200
+        assert result["body"] == "OK"
+
+
 # ── Lead routing ────────────────────────────────────────────────────
 
 
@@ -238,7 +287,7 @@ class TestEdgeCases:
             result = handler.main(event, None)
         assert result["statusCode"] == 200
 
-    def test_malformed_body_returns_401(self):
+    def test_malformed_body_returns_400(self):
         raw_body = "not-json{"
         sig = _sign(raw_body)
         event = {
@@ -254,7 +303,7 @@ class TestEdgeCases:
             }
         }
         result = handler.main(event, None)
-        assert result["statusCode"] == 401
+        assert result["statusCode"] == 400
 
     def test_empty_body_returns_401(self):
         event = {

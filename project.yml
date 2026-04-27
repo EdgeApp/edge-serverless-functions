@@ -4,15 +4,9 @@ packages:
       INTERCOM_ACCESS_TOKEN: ${INTERCOM_ACCESS_TOKEN}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET}
     functions:
-      - name: lead-to-user
+      - name: webhook
         runtime: python:3.12
         web: raw
         limits:
           timeout: 15000
-          memory: 256
-      - name: call-timezone
-        runtime: python:3.12
-        web: raw
-        limits:
-          timeout: 15000
-          memory: 256
+          memory: 512
