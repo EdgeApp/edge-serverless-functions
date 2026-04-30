@@ -130,5 +130,5 @@ def update_contact_attributes(contact_id: str, attrs: dict) -> dict:
     if not resp.ok:
         logger.error("Intercom API error %s: %s", resp.status_code, resp.text)
     resp.raise_for_status()
-    logger.info("Updated custom_attributes on contact %s: %s", contact_id, attrs)
+    logger.info("Updated custom_attributes on contact %s", contact_id)
     return resp.json()
