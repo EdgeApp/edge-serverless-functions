@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://api.intercom.io"
 API_VERSION = "2.11"
 
-_cached_admin_id = None
+_cached_bot_id = None
 
 
 def _headers():
@@ -88,21 +88,37 @@ def merge_lead_into_user(lead_id, user_id):
 # ── Conversation / contact helpers (call-timezone) ──────────────────
 
 
-def _get_admin_id() -> str:
-    """Fetch the admin ID for the token owner (cached after first call)."""
-    global _cached_admin_id
-    if _cached_admin_id:
-        return _cached_admin_id
+def _get_bot_admin_id() -> str:
+    """Return the Operator bot's admin ID so notes aren't attributed to a human.
+
+    Falls back to the token owner (GET /me) if no bot is found.
+    """
+    global _cached_bot_id
+    if _cached_bot_id:
+        return _cached_bot_id
+
+    resp = requests.get(f"{BASE_URL}/admins", headers=_headers(), timeout=10)
+    resp.raise_for_status()
+    admins = resp.json().get("admins", [])
+
+    for admin in admins:
+        email = admin.get("email") or ""
+        if "operator" in email:
+            _cached_bot_id = admin["id"]
+            logger.info("Using Operator bot admin_id=%s", _cached_bot_id)
+            return _cached_bot_id
+
+    logger.warning("No Operator bot found in admin list, falling back to token owner")
     resp = requests.get(f"{BASE_URL}/me", headers=_headers(), timeout=10)
     resp.raise_for_status()
-    _cached_admin_id = resp.json()["id"]
-    logger.info("Resolved token owner admin_id=%s", _cached_admin_id)
-    return _cached_admin_id
+    _cached_bot_id = resp.json()["id"]
+    logger.info("Fell back to token owner admin_id=%s", _cached_bot_id)
+    return _cached_bot_id
 
 
 def create_conversation_note(conversation_id: str, body: str) -> dict:
     """POST /conversations/{id}/parts — add an internal note to a conversation."""
-    admin_id = _get_admin_id()
+    admin_id = _get_bot_admin_id()
     resp = requests.post(
         f"{BASE_URL}/conversations/{conversation_id}/parts",
         headers=_headers(),
