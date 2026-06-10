@@ -18,13 +18,20 @@ def handle(payload):
     role = item.get("role")
     email = item.get("email")
     lead_id = item.get("id")
+    lead_user_id = item.get("user_id") or item.get("external_id")
     name = item.get("name")
 
-    if role != "lead" or not email or not lead_id:
-        logger.info("Skipping: role=%s, email=%s, lead_id=%s", role, email, lead_id)
+    if role != "lead" or not email or not lead_id or not lead_user_id:
+        logger.info(
+            "Skipping: role=%s, email=%s, lead_id=%s, lead_user_id=%s",
+            role,
+            email,
+            lead_id,
+            lead_user_id,
+        )
         return {"statusCode": 200, "body": "Skipped"}
 
-    external_id = f"lead:{lead_id}"
+    external_id = lead_user_id
 
     try:
         users = search_users_by_external_id(external_id)
