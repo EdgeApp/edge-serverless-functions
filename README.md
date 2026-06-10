@@ -26,11 +26,12 @@ email address. Handles three webhook topics:
      then by email — so repeated webhooks don't create duplicates
    - If none exists, creates a user with **email only** (no `external_id`)
    - Merges the lead into the user (lead is deleted)
-   - **Identity is preserved:** the merge carries the lead's existing `user_id`
-     over to the surviving user. We deliberately do *not* set `external_id` on
-     create, because that id is already held by the lead and would (a) 409 on
-     create and (b) change the contact's identity, breaking the customer's
-     Messenger session / conversation ownership.
+   - **Reassigns the lead's original id** onto the surviving user via
+     `PUT /contacts/{id}`, so identity is preserved. We deliberately do *not*
+     set `external_id` on create (the lead still holds that id, so it would
+     409), and the merge does not reliably carry it over — hence the explicit
+     reassignment. Preserving the id keeps the customer's Messenger session /
+     conversation ownership intact.
 5. Returns 200 so Intercom does not retry
 
 ### Inbound Call Timezone Inference

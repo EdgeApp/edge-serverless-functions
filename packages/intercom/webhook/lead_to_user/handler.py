@@ -8,10 +8,10 @@ Identity preservation: a lead may already carry a client identifier (shown as
 "User id" in the Intercom UI; delivered as ``user_id`` in webhook payloads and
 called ``external_id`` in the REST API). That id MUST survive the conversion,
 otherwise the customer's Messenger session no longer maps to the contact that
-owns their conversation. We therefore never create a user with an explicit
-external_id (which would collide with the id the lead already holds and 409);
-instead we create the user with email only and let the merge carry the lead's
-existing id over to the surviving user.
+owns their conversation. We never create a user with an explicit external_id
+(which would collide with the id the lead already holds and 409). Instead we
+create the user with email only, merge the lead in, and then reassign the
+lead's id onto the surviving user — the merge does not reliably carry it over.
 """
 
 import logging
@@ -21,6 +21,7 @@ from intercom_client import (
     search_users_by_email,
     create_user,
     merge_lead_into_user,
+    set_user_external_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,8 +47,10 @@ def handle(payload):
         # don't create duplicates. Match on the lead's existing id first (the
         # identity we must preserve), then fall back to email.
         users = []
+        found_by_external_id = False
         if lead_user_id:
             users = search_users_by_external_id(lead_user_id)
+            found_by_external_id = bool(users)
         if not users:
             users = search_users_by_email(email)
 
@@ -60,22 +63,24 @@ def handle(payload):
                 lead_user_id,
             )
         else:
-            # Create the user with email only — no external_id. The merge below
-            # promotes the lead and carries its existing user_id over, so the
-            # contact keeps the same identity it had as a lead.
+            # Create the user with email only — no external_id. Setting it here
+            # would collide with the id the lead still holds.
             new_user = create_user(email, name)
             user_id = new_user["id"]
 
         result = merge_lead_into_user(lead_id, user_id)
         if result:
-            logger.info(
-                "Conversion complete: lead %s → user %s (identity %s)",
-                lead_id,
-                user_id,
-                lead_user_id,
-            )
+            logger.info("Conversion complete: lead %s → user %s", lead_id, user_id)
         else:
             logger.info("Lead %s was already merged", lead_id)
+
+        # Reassign the lead's original id onto the surviving user. The merge does
+        # not reliably transfer it, so we set it explicitly. This is safe (the
+        # lead is gone, so the id is free) and idempotent (no-op if it already
+        # matches). Skip when the user was found by that id — it already has it.
+        if lead_user_id and not found_by_external_id:
+            set_user_external_id(user_id, lead_user_id)
+            logger.info("Reassigned identity %s onto user %s", lead_user_id, user_id)
 
     except Exception:
         logger.exception("Error converting lead %s (%s)", lead_id, email)
