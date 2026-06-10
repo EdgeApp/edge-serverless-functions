@@ -20,9 +20,17 @@ email address. Handles three webhook topics:
 2. The router verifies the HMAC-SHA1 signature
 3. The topic is matched and dispatched to the lead-to-user handler
 4. If the contact is a lead with an email:
-   - Searches for an existing user with `external_id = <lead user_id>`
-   - Creates one with the lead's `user_id` as that `external_id` if none exists
+   - Looks for an existing user that already represents this person — first by
+     the lead's existing identifier (`user_id` in the webhook payload, aka
+     `external_id` in the REST API; shown as "User id" in the Intercom UI),
+     then by email — so repeated webhooks don't create duplicates
+   - If none exists, creates a user with **email only** (no `external_id`)
    - Merges the lead into the user (lead is deleted)
+   - **Identity is preserved:** the merge carries the lead's existing `user_id`
+     over to the surviving user. We deliberately do *not* set `external_id` on
+     create, because that id is already held by the lead and would (a) 409 on
+     create and (b) change the contact's identity, breaking the customer's
+     Messenger session / conversation ownership.
 5. Returns 200 so Intercom does not retry
 
 ### Inbound Call Timezone Inference
