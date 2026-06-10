@@ -24,7 +24,8 @@ INTERCOM_TOKEN = "fake-token"
 
 
 def _make_payload(role="lead", email="jane@example.com", name="Jane Doe",
-                  lead_id="lead_abc123", topic="contact.lead.created"):
+                  lead_id="lead_abc123", user_id="user_abc123",
+                  topic="contact.lead.created"):
     return {
         "type": "notification_event",
         "topic": topic,
@@ -36,6 +37,7 @@ def _make_payload(role="lead", email="jane@example.com", name="Jane Doe",
                 "role": role,
                 "email": email,
                 "name": name,
+                "user_id": user_id,
             },
         },
     }
@@ -230,10 +232,17 @@ class TestLeadRouting:
         create_call = mock_post.call_args_list[1]
         assert create_call[1]["json"]["role"] == "user"
         assert create_call[1]["json"]["email"] == "jane@example.com"
-        assert create_call[1]["json"]["external_id"] == "lead:lead_abc123"
+        assert create_call[1]["json"]["external_id"] == "user_abc123"
 
-    def test_new_lead_creates_user_with_external_id_and_email(self):
-        event = _make_event(_make_payload(lead_id="lead_xyz", email="new@example.com", name="New User"))
+    def test_new_lead_creates_user_with_lead_user_id_and_email(self):
+        event = _make_event(
+            _make_payload(
+                lead_id="lead_xyz",
+                user_id="actual_user_id",
+                email="new@example.com",
+                name="New User",
+            )
+        )
         with patch("intercom_client.requests.post") as mock_post:
             mock_post.side_effect = [
                 _mock_search([]),
@@ -244,18 +253,18 @@ class TestLeadRouting:
 
         assert result["statusCode"] == 200
         create_call = mock_post.call_args_list[1]
-        assert create_call[1]["json"]["external_id"] == "lead:lead_xyz"
+        assert create_call[1]["json"]["external_id"] == "actual_user_id"
         assert create_call[1]["json"]["email"] == "new@example.com"
         assert create_call[1]["json"]["name"] == "New User"
         assert create_call[1]["json"]["role"] == "user"
 
     def test_repeated_lead_reuses_same_external_id(self):
-        """Same lead_id fired again → user found by external_id, no new user created."""
+        """Same lead user_id fired again -> user found by external_id, no new user created."""
         existing_user = {
             "id": "user_1", "role": "user",
-            "email": "jane@example.com", "external_id": "lead:lead_abc123",
+            "email": "jane@example.com", "external_id": "user_abc123",
         }
-        event = _make_event(_make_payload(lead_id="lead_abc123"))
+        event = _make_event(_make_payload(lead_id="lead_abc123", user_id="user_abc123"))
         with patch("intercom_client.requests.post") as mock_post:
             mock_post.side_effect = [
                 _mock_search([existing_user]),
@@ -270,12 +279,14 @@ class TestLeadRouting:
         assert merge_call[1]["json"]["into"] == "user_1"
 
     def test_email_changed_lead_reuses_same_external_id(self):
-        """Lead email changes → still finds user by external_id, not email."""
+        """Lead email changes -> still finds user by external_id, not email."""
         existing_user = {
             "id": "user_1", "role": "user",
-            "email": "old@example.com", "external_id": "lead:lead_abc123",
+            "email": "old@example.com", "external_id": "user_abc123",
         }
-        event = _make_event(_make_payload(lead_id="lead_abc123", email="new@example.com"))
+        event = _make_event(
+            _make_payload(lead_id="lead_abc123", user_id="user_abc123", email="new@example.com")
+        )
         with patch("intercom_client.requests.post") as mock_post:
             mock_post.side_effect = [
                 _mock_search([existing_user]),
@@ -325,6 +336,37 @@ class TestLeadRouting:
         assert result["statusCode"] == 200
         assert result["body"] == "Skipped"
         mock_post.assert_not_called()
+
+    def test_lead_missing_user_id_skipped_without_api_call(self):
+        payload = _make_payload()
+        payload["data"]["item"].pop("user_id")
+        raw_body = json.dumps(payload)
+        event = _make_event(payload, raw_body_override=raw_body)
+
+        with patch("intercom_client.requests.post") as mock_post:
+            result = handler.main(event, None)
+
+        assert result["statusCode"] == 200
+        assert result["body"] == "Skipped"
+        mock_post.assert_not_called()
+
+    def test_lead_external_id_fallback_used_without_user_id(self):
+        payload = _make_payload()
+        payload["data"]["item"]["external_id"] = "external_from_lead"
+        payload["data"]["item"].pop("user_id")
+        event = _make_event(payload)
+
+        with patch("intercom_client.requests.post") as mock_post:
+            mock_post.side_effect = [
+                _mock_search([]),
+                _mock_create("user_new", "jane@example.com"),
+                _mock_merge("user_new", "jane@example.com"),
+            ]
+            result = handler.main(event, None)
+
+        assert result["statusCode"] == 200
+        create_call = mock_post.call_args_list[1]
+        assert create_call[1]["json"]["external_id"] == "external_from_lead"
 
     def test_lead_empty_email_skipped(self):
         payload = _make_payload(email="")

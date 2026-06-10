@@ -8,7 +8,8 @@
       "id": "lead_abc123",
       "role": "lead",
       "email": "jane@example.com",
-      "name": "Jane Doe"
+      "name": "Jane Doe",
+      "user_id": "user_abc123"
     }
   }
 }
