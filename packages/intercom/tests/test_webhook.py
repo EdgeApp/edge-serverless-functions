@@ -313,6 +313,19 @@ class TestLeadRouting:
         assert result["statusCode"] == 200
         assert result["body"] == "Skipped"
 
+    def test_lead_missing_id_skipped_without_api_call(self):
+        payload = _make_payload()
+        payload["data"]["item"].pop("id")
+        raw_body = json.dumps(payload)
+        event = _make_event(payload, raw_body_override=raw_body)
+
+        with patch("intercom_client.requests.post") as mock_post:
+            result = handler.main(event, None)
+
+        assert result["statusCode"] == 200
+        assert result["body"] == "Skipped"
+        mock_post.assert_not_called()
+
     def test_lead_empty_email_skipped(self):
         payload = _make_payload(email="")
         raw_body = json.dumps(payload)

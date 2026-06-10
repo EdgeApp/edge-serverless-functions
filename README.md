@@ -20,8 +20,8 @@ email address. Handles three webhook topics:
 2. The router verifies the HMAC-SHA1 signature
 3. The topic is matched and dispatched to the lead-to-user handler
 4. If the contact is a lead with an email:
-   - Searches for an existing user with that email
-   - Creates one if none exists
+   - Searches for an existing user with `external_id = lead:<lead_id>`
+   - Creates one with that `external_id` if none exists
    - Merges the lead into the user (lead is deleted)
 5. Returns 200 so Intercom does not retry
 

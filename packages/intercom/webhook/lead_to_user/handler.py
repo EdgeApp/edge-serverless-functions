@@ -20,8 +20,8 @@ def handle(payload):
     lead_id = item.get("id")
     name = item.get("name")
 
-    if role != "lead" or not email:
-        logger.info("Skipping: role=%s, email=%s", role, email)
+    if role != "lead" or not email or not lead_id:
+        logger.info("Skipping: role=%s, email=%s, lead_id=%s", role, email, lead_id)
         return {"statusCode": 200, "body": "Skipped"}
 
     external_id = f"lead:{lead_id}"
