@@ -104,6 +104,28 @@ def merge_lead_into_user(lead_id, user_id):
     return resp.json()
 
 
+def set_user_external_id(contact_id, external_id):
+    """PUT /contacts/{contact_id} — set the external_id (the client identifier
+    shown as "User id" in the Intercom UI) on a contact.
+
+    Used after a lead→user merge to reassign the lead's original id onto the
+    surviving user, since the merge does not reliably carry it over. Safe to
+    call once the lead is gone (the id is free) and idempotent if it already
+    matches.
+    """
+    resp = requests.put(
+        f"{BASE_URL}/contacts/{contact_id}",
+        headers=_headers(),
+        json={"external_id": external_id},
+        timeout=10,
+    )
+    if not resp.ok:
+        logger.error("Intercom API error %s: %s", resp.status_code, resp.text)
+    resp.raise_for_status()
+    logger.info("Set external_id=%s on contact %s", external_id, contact_id)
+    return resp.json()
+
+
 # ── Conversation / contact helpers (call-timezone) ──────────────────
 
 
