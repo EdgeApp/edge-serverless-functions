@@ -135,7 +135,8 @@ class TestSignatureVerification:
         event = _make_event(_make_payload())
         with patch("intercom_client.requests.post") as mock_post:
             mock_post.side_effect = [
-                _mock_search([]),
+                _mock_search([]),  # search by user_id
+                _mock_search([]),  # fallback search by email
                 _mock_create("user_1", "jane@example.com"),
                 _mock_merge("user_1", "jane@example.com"),
             ]
@@ -157,6 +158,7 @@ class TestSignatureVerification:
         event = _make_event_base64(_make_payload())
         with patch("intercom_client.requests.post") as mock_post:
             mock_post.side_effect = [
+                _mock_search([]),
                 _mock_search([]),
                 _mock_create("user_1", "jane@example.com"),
                 _mock_merge("user_1", "jane@example.com"),
@@ -181,6 +183,7 @@ class TestTopicRouting:
         with patch("intercom_client.requests.post") as mock_post:
             mock_post.side_effect = [
                 _mock_search([]),
+                _mock_search([]),
                 _mock_create("user_1", "jane@example.com"),
                 _mock_merge("user_1", "jane@example.com"),
             ]
@@ -192,6 +195,7 @@ class TestTopicRouting:
         event = _make_event(_make_payload(topic="contact.lead.added_email"))
         with patch("intercom_client.requests.post") as mock_post:
             mock_post.side_effect = [
+                _mock_search([]),
                 _mock_search([]),
                 _mock_create("user_1", "jane@example.com"),
                 _mock_merge("user_1", "jane@example.com"),
@@ -205,6 +209,7 @@ class TestTopicRouting:
         with patch("intercom_client.requests.post") as mock_post:
             mock_post.side_effect = [
                 _mock_search([]),
+                _mock_search([]),
                 _mock_create("user_1", "jane@example.com"),
                 _mock_merge("user_1", "jane@example.com"),
             ]
@@ -217,24 +222,32 @@ class TestTopicRouting:
 
 
 class TestLeadRouting:
-    def test_lead_no_existing_user_creates_and_merges(self):
+    def test_lead_no_existing_user_creates_without_external_id_then_merges(self):
+        """No existing user: create with email only (NOT the lead's id) so the
+        merge carries the lead's user_id over and identity is preserved."""
         event = _make_event(_make_payload())
         with patch("intercom_client.requests.post") as mock_post:
             mock_post.side_effect = [
-                _mock_search([]),
+                _mock_search([]),  # search by user_id -> none
+                _mock_search([]),  # fallback search by email -> none
                 _mock_create("user_new", "jane@example.com"),
                 _mock_merge("user_new", "jane@example.com"),
             ]
             result = handler.main(event, None)
 
         assert result["statusCode"] == 200
-        assert mock_post.call_count == 3
-        create_call = mock_post.call_args_list[1]
+        assert mock_post.call_count == 4
+        create_call = mock_post.call_args_list[2]
         assert create_call[1]["json"]["role"] == "user"
         assert create_call[1]["json"]["email"] == "jane@example.com"
-        assert create_call[1]["json"]["external_id"] == "user_abc123"
+        # Critical: we must NOT set external_id on create — that id is already
+        # held by the lead and would 409. The merge carries it over instead.
+        assert "external_id" not in create_call[1]["json"]
+        merge_call = mock_post.call_args_list[3]
+        assert merge_call[1]["json"]["from"] == "lead_abc123"
+        assert merge_call[1]["json"]["into"] == "user_new"
 
-    def test_new_lead_creates_user_with_lead_user_id_and_email(self):
+    def test_new_lead_creates_user_without_external_id(self):
         event = _make_event(
             _make_payload(
                 lead_id="lead_xyz",
@@ -246,14 +259,15 @@ class TestLeadRouting:
         with patch("intercom_client.requests.post") as mock_post:
             mock_post.side_effect = [
                 _mock_search([]),
+                _mock_search([]),
                 _mock_create("user_new", "new@example.com"),
                 _mock_merge("user_new", "new@example.com"),
             ]
             result = handler.main(event, None)
 
         assert result["statusCode"] == 200
-        create_call = mock_post.call_args_list[1]
-        assert create_call[1]["json"]["external_id"] == "actual_user_id"
+        create_call = mock_post.call_args_list[2]
+        assert "external_id" not in create_call[1]["json"]
         assert create_call[1]["json"]["email"] == "new@example.com"
         assert create_call[1]["json"]["name"] == "New User"
         assert create_call[1]["json"]["role"] == "user"
@@ -337,36 +351,55 @@ class TestLeadRouting:
         assert result["body"] == "Skipped"
         mock_post.assert_not_called()
 
-    def test_lead_missing_user_id_skipped_without_api_call(self):
+    def test_lead_missing_user_id_falls_back_to_email(self):
+        """A lead with no user_id still converts: we search by email, then
+        create + merge. (We no longer skip, which was the regression.)"""
         payload = _make_payload()
         payload["data"]["item"].pop("user_id")
         raw_body = json.dumps(payload)
         event = _make_event(payload, raw_body_override=raw_body)
 
         with patch("intercom_client.requests.post") as mock_post:
-            result = handler.main(event, None)
-
-        assert result["statusCode"] == 200
-        assert result["body"] == "Skipped"
-        mock_post.assert_not_called()
-
-    def test_lead_external_id_fallback_used_without_user_id(self):
-        payload = _make_payload()
-        payload["data"]["item"]["external_id"] = "external_from_lead"
-        payload["data"]["item"].pop("user_id")
-        event = _make_event(payload)
-
-        with patch("intercom_client.requests.post") as mock_post:
             mock_post.side_effect = [
-                _mock_search([]),
+                _mock_search([]),  # search by email -> none (no user_id to search)
                 _mock_create("user_new", "jane@example.com"),
                 _mock_merge("user_new", "jane@example.com"),
             ]
             result = handler.main(event, None)
 
         assert result["statusCode"] == 200
+        assert result["body"] == "OK"
+        assert mock_post.call_count == 3  # one search (email), create, merge
+        search_call = mock_post.call_args_list[0]
+        assert search_call[1]["json"]["query"]["field"] == "email"
         create_call = mock_post.call_args_list[1]
-        assert create_call[1]["json"]["external_id"] == "external_from_lead"
+        assert "external_id" not in create_call[1]["json"]
+
+    def test_lead_external_id_used_for_lookup(self):
+        """When the lead carries external_id instead of user_id, we still use it
+        to find an existing user (identity match)."""
+        payload = _make_payload()
+        payload["data"]["item"]["external_id"] = "external_from_lead"
+        payload["data"]["item"].pop("user_id")
+        event = _make_event(payload)
+
+        existing_user = {
+            "id": "user_match", "role": "user",
+            "email": "jane@example.com", "external_id": "external_from_lead",
+        }
+        with patch("intercom_client.requests.post") as mock_post:
+            mock_post.side_effect = [
+                _mock_search([existing_user]),  # search by external_id finds the user
+                _mock_merge("user_match", "jane@example.com"),
+            ]
+            result = handler.main(event, None)
+
+        assert result["statusCode"] == 200
+        assert mock_post.call_count == 2  # search + merge, no create
+        search_call = mock_post.call_args_list[0]
+        assert search_call[1]["json"]["query"]["value"] == "external_from_lead"
+        merge_call = mock_post.call_args_list[1]
+        assert merge_call[1]["json"]["into"] == "user_match"
 
     def test_lead_empty_email_skipped(self):
         payload = _make_payload(email="")
