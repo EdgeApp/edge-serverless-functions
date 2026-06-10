@@ -7,7 +7,7 @@ and contact.email.updated topics.
 
 import logging
 
-from intercom_client import search_users_by_email, create_user, merge_lead_into_user
+from intercom_client import search_users_by_external_id, create_user, merge_lead_into_user
 
 logger = logging.getLogger(__name__)
 
@@ -24,14 +24,16 @@ def handle(payload):
         logger.info("Skipping: role=%s, email=%s", role, email)
         return {"statusCode": 200, "body": "Skipped"}
 
+    external_id = f"lead:{lead_id}"
+
     try:
-        users = search_users_by_email(email)
+        users = search_users_by_external_id(external_id)
 
         if users:
             user_id = users[0]["id"]
-            logger.info("Found existing user %s for %s", user_id, email)
+            logger.info("Found existing user %s for external_id %s", user_id, external_id)
         else:
-            new_user = create_user(email, name)
+            new_user = create_user(email, name, external_id)
             user_id = new_user["id"]
 
         result = merge_lead_into_user(lead_id, user_id)

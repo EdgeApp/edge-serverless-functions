@@ -29,6 +29,22 @@ def _headers():
 # ── Contact helpers (lead-to-user) ──────────────────────────────────
 
 
+def search_users_by_external_id(external_id):
+    """Search Intercom contacts by external_id and return only those with role 'user'."""
+    resp = requests.post(
+        f"{BASE_URL}/contacts/search",
+        headers=_headers(),
+        json={
+            "query": {"field": "external_id", "operator": "=", "value": external_id},
+            "pagination": {"per_page": 10},
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    contacts = resp.json().get("data", [])
+    return [c for c in contacts if c.get("role") == "user"]
+
+
 def search_users_by_email(email):
     """Search Intercom contacts by email and return only those with role 'user'."""
     resp = requests.post(
@@ -50,9 +66,12 @@ def search_users_by_email(email):
     return users
 
 
-def create_user(email, name=None):
+def create_user(email, name=None, external_id=None):
     """Create a new Intercom contact with role 'user'."""
-    body = {"role": "user", "email": email}
+    body = {"role": "user"}
+    if external_id:
+        body["external_id"] = external_id
+    body["email"] = email
     if name:
         body["name"] = name
     resp = requests.post(
