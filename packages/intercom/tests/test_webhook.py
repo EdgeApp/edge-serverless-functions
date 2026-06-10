@@ -230,6 +230,63 @@ class TestLeadRouting:
         create_call = mock_post.call_args_list[1]
         assert create_call[1]["json"]["role"] == "user"
         assert create_call[1]["json"]["email"] == "jane@example.com"
+        assert create_call[1]["json"]["external_id"] == "lead:lead_abc123"
+
+    def test_new_lead_creates_user_with_external_id_and_email(self):
+        event = _make_event(_make_payload(lead_id="lead_xyz", email="new@example.com", name="New User"))
+        with patch("intercom_client.requests.post") as mock_post:
+            mock_post.side_effect = [
+                _mock_search([]),
+                _mock_create("user_new", "new@example.com"),
+                _mock_merge("user_new", "new@example.com"),
+            ]
+            result = handler.main(event, None)
+
+        assert result["statusCode"] == 200
+        create_call = mock_post.call_args_list[1]
+        assert create_call[1]["json"]["external_id"] == "lead:lead_xyz"
+        assert create_call[1]["json"]["email"] == "new@example.com"
+        assert create_call[1]["json"]["name"] == "New User"
+        assert create_call[1]["json"]["role"] == "user"
+
+    def test_repeated_lead_reuses_same_external_id(self):
+        """Same lead_id fired again → user found by external_id, no new user created."""
+        existing_user = {
+            "id": "user_1", "role": "user",
+            "email": "jane@example.com", "external_id": "lead:lead_abc123",
+        }
+        event = _make_event(_make_payload(lead_id="lead_abc123"))
+        with patch("intercom_client.requests.post") as mock_post:
+            mock_post.side_effect = [
+                _mock_search([existing_user]),
+                _mock_merge("user_1", "jane@example.com"),
+            ]
+            result = handler.main(event, None)
+
+        assert result["statusCode"] == 200
+        assert mock_post.call_count == 2  # search + merge only, no create
+        merge_call = mock_post.call_args_list[1]
+        assert merge_call[1]["json"]["from"] == "lead_abc123"
+        assert merge_call[1]["json"]["into"] == "user_1"
+
+    def test_email_changed_lead_reuses_same_external_id(self):
+        """Lead email changes → still finds user by external_id, not email."""
+        existing_user = {
+            "id": "user_1", "role": "user",
+            "email": "old@example.com", "external_id": "lead:lead_abc123",
+        }
+        event = _make_event(_make_payload(lead_id="lead_abc123", email="new@example.com"))
+        with patch("intercom_client.requests.post") as mock_post:
+            mock_post.side_effect = [
+                _mock_search([existing_user]),
+                _mock_merge("user_1", "new@example.com"),
+            ]
+            result = handler.main(event, None)
+
+        assert result["statusCode"] == 200
+        assert mock_post.call_count == 2  # no create despite email mismatch
+        merge_call = mock_post.call_args_list[1]
+        assert merge_call[1]["json"]["into"] == "user_1"
 
     def test_lead_with_existing_user_merges_directly(self):
         existing_user = {"type": "contact", "id": "user_existing", "role": "user", "email": "jane@example.com"}
@@ -255,6 +312,19 @@ class TestLeadRouting:
         result = handler.main(event, None)
         assert result["statusCode"] == 200
         assert result["body"] == "Skipped"
+
+    def test_lead_missing_id_skipped_without_api_call(self):
+        payload = _make_payload()
+        payload["data"]["item"].pop("id")
+        raw_body = json.dumps(payload)
+        event = _make_event(payload, raw_body_override=raw_body)
+
+        with patch("intercom_client.requests.post") as mock_post:
+            result = handler.main(event, None)
+
+        assert result["statusCode"] == 200
+        assert result["body"] == "Skipped"
+        mock_post.assert_not_called()
 
     def test_lead_empty_email_skipped(self):
         payload = _make_payload(email="")
@@ -325,6 +395,29 @@ class TestEdgeCases:
 
 
 class TestIntercomClient:
+    def test_search_by_external_id_returns_users_only(self):
+        mixed = [
+            {"id": "c1", "role": "lead", "external_id": "lead:x"},
+            {"id": "c2", "role": "user", "external_id": "lead:x"},
+        ]
+        with patch("intercom_client.requests.post") as mock_post:
+            mock_post.return_value.raise_for_status = MagicMock()
+            mock_post.return_value.json.return_value = {"data": mixed}
+            users = intercom_client.search_users_by_external_id("lead:x")
+        assert len(users) == 1
+        assert users[0]["id"] == "c2"
+        call_json = mock_post.call_args[1]["json"]
+        assert call_json["query"]["field"] == "external_id"
+        assert call_json["query"]["value"] == "lead:x"
+
+    def test_create_user_with_external_id(self):
+        with patch("intercom_client.requests.post") as mock_post:
+            mock_post.return_value = _mock_create("u1", "test@test.com")
+            intercom_client.create_user("test@test.com", name="Test", external_id="lead:abc")
+        call_json = mock_post.call_args[1]["json"]
+        assert call_json == {"role": "user", "email": "test@test.com", "name": "Test", "external_id": "lead:abc"}
+        assert list(call_json).index("external_id") < list(call_json).index("email")
+
     def test_search_filters_by_user_role(self):
         mixed = [
             {"id": "c1", "role": "lead", "email": "a@b.com"},
