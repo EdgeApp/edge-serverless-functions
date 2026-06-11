@@ -1,20 +1,25 @@
 """Lead-to-user auto-converter.
 
-Converts Intercom leads into users whenever a lead has an email address.
 Called by the webhook router for contact.lead.created, contact.lead.added_email,
 and contact.email.updated topics.
 
-Identity preservation: a lead may already carry a client identifier (shown as
-"User id" in the Intercom UI; delivered as ``user_id`` in webhook payloads and
-called ``external_id`` in the REST API). That id MUST survive the conversion,
-otherwise the customer's Messenger session no longer maps to the contact that
-owns their conversation. We never create a user with an explicit external_id
-(which would collide with the id the lead already holds and 409). Instead we
-create the user with email only, merge the lead in, and then reassign the
-lead's id onto the surviving user — the merge does not reliably carry it over.
+IMPORTANT — why conversion is disabled by default:
+Converting a lead to a user server-side requires Intercom's merge API, which
+*permanently deletes the lead profile*. A customer's live Messenger session is
+bound to the lead's Intercom contact ``id`` (not their email or external_id),
+so the merge orphans that session and the next message fails to send
+("Couldn't send"). Intercom confirms this is expected behaviour of the merge
+API, and there is no REST way to promote a lead to a user in place. The correct
+fix is client-side: on login, call Intercom('shutdown') then boot with
+user_id + email (+ user_hash) so the Messenger re-establishes the session.
+
+This handler therefore only performs the merge when LEAD_TO_USER_CONVERSION_ENABLED
+is explicitly truthy. With it unset (the default) the lead is left intact and
+keeps chatting.
 """
 
 import logging
+import os
 
 from intercom_client import (
     search_users_by_external_id,
@@ -25,6 +30,12 @@ from intercom_client import (
 )
 
 logger = logging.getLogger(__name__)
+
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _conversion_enabled():
+    return os.environ.get("LEAD_TO_USER_CONVERSION_ENABLED", "").strip().lower() in _TRUTHY
 
 
 def handle(payload):
@@ -41,6 +52,15 @@ def handle(payload):
     if role != "lead" or not email or not lead_id:
         logger.info("Skipping: role=%s, email=%s, lead_id=%s", role, email, lead_id)
         return {"statusCode": 200, "body": "Skipped"}
+
+    if not _conversion_enabled():
+        # Do NOT merge: it would delete the lead and break their live Messenger
+        # session. Leave the lead intact; conversion must happen client-side.
+        logger.info(
+            "Conversion disabled; leaving lead %s intact to preserve Messenger session",
+            lead_id,
+        )
+        return {"statusCode": 200, "body": "Skipped (conversion disabled)"}
 
     try:
         # Find a user that already represents this person, so repeated webhooks
@@ -75,9 +95,7 @@ def handle(payload):
             logger.info("Lead %s was already merged", lead_id)
 
         # Reassign the lead's original id onto the surviving user. The merge does
-        # not reliably transfer it, so we set it explicitly. This is safe (the
-        # lead is gone, so the id is free) and idempotent (no-op if it already
-        # matches). Skip when the user was found by that id — it already has it.
+        # not reliably transfer it. Skip when the user was found by that id.
         if lead_user_id and not found_by_external_id:
             set_user_external_id(user_id, lead_user_id)
             logger.info("Reassigned identity %s onto user %s", lead_user_id, user_id)

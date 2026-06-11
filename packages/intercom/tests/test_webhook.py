@@ -92,6 +92,9 @@ def _make_event_base64(payload_dict, secret=WEBHOOK_SECRET):
 def _set_env(monkeypatch):
     monkeypatch.setenv("WEBHOOK_SECRET", WEBHOOK_SECRET)
     monkeypatch.setenv("INTERCOM_ACCESS_TOKEN", INTERCOM_TOKEN)
+    # Most tests exercise the conversion path; enable it explicitly. Production
+    # leaves this unset (disabled) so the merge can't break live chats.
+    monkeypatch.setenv("LEAD_TO_USER_CONVERSION_ENABLED", "true")
 
 
 def _mock_search(users):
@@ -459,6 +462,32 @@ class TestLeadRouting:
         result = handler.main(event, None)
         assert result["statusCode"] == 200
         assert result["body"] == "Skipped"
+
+    def test_conversion_disabled_makes_no_api_calls(self, monkeypatch):
+        """Default (disabled) behavior: never merge, so a live Messenger session
+        is never orphaned."""
+        monkeypatch.setenv("LEAD_TO_USER_CONVERSION_ENABLED", "false")
+        event = _make_event(_make_payload())
+        with patch("intercom_client.requests.post") as mock_post, \
+             patch("intercom_client.requests.put") as mock_put:
+            result = handler.main(event, None)
+
+        assert result["statusCode"] == 200
+        assert result["body"] == "Skipped (conversion disabled)"
+        mock_post.assert_not_called()
+        mock_put.assert_not_called()
+
+    def test_conversion_disabled_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("LEAD_TO_USER_CONVERSION_ENABLED", raising=False)
+        event = _make_event(_make_payload())
+        with patch("intercom_client.requests.post") as mock_post, \
+             patch("intercom_client.requests.put") as mock_put:
+            result = handler.main(event, None)
+
+        assert result["statusCode"] == 200
+        assert result["body"] == "Skipped (conversion disabled)"
+        mock_post.assert_not_called()
+        mock_put.assert_not_called()
 
 
 # ── Edge cases ──────────────────────────────────────────────────────

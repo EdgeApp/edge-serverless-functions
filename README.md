@@ -5,10 +5,24 @@ handled by a single `intercom/webhook` function that routes by topic.
 
 ## Webhook Handlers
 
-### Lead-to-User Auto-Converter
+### Lead-to-User Auto-Converter (DISABLED by default)
 
-Automatically converts Intercom leads into users whenever a lead has an
-email address. Handles three webhook topics:
+> ⚠️ **Server-side lead→user conversion is disabled by default and should stay
+> that way unless you understand the tradeoff below.**
+>
+> Converting a lead to a user requires Intercom's merge API, which
+> **permanently deletes the lead profile**. A customer's live Messenger session
+> is bound to the lead's Intercom contact `id` (not their email or
+> `external_id`), so the merge **orphans the session** — the next message fails
+> with "Couldn't send." Intercom confirms this is expected behaviour of merge,
+> and there is **no REST way to promote a lead to a user in place**.
+>
+> The correct fix is **client-side**: when the person logs in / provides an
+> email, your app should call `Intercom('shutdown')` then boot with `user_id`
+> + `email` (+ `user_hash` if you use Identity Verification). The Messenger then
+> transitions the lead to a user natively and keeps the session alive.
+
+Handles three webhook topics:
 
 - **`contact.lead.created`** — lead created with an email
 - **`contact.lead.added_email`** — email added to a lead that had none
@@ -19,20 +33,14 @@ email address. Handles three webhook topics:
 1. Intercom fires a webhook to the single endpoint
 2. The router verifies the HMAC-SHA1 signature
 3. The topic is matched and dispatched to the lead-to-user handler
-4. If the contact is a lead with an email:
-   - Looks for an existing user that already represents this person — first by
-     the lead's existing identifier (`user_id` in the webhook payload, aka
-     `external_id` in the REST API; shown as "User id" in the Intercom UI),
-     then by email — so repeated webhooks don't create duplicates
-   - If none exists, creates a user with **email only** (no `external_id`)
-   - Merges the lead into the user (lead is deleted)
-   - **Reassigns the lead's original id** onto the surviving user via
-     `PUT /contacts/{id}`, so identity is preserved. We deliberately do *not*
-     set `external_id` on create (the lead still holds that id, so it would
-     409), and the merge does not reliably carry it over — hence the explicit
-     reassignment. Preserving the id keeps the customer's Messenger session /
-     conversation ownership intact.
-5. Returns 200 so Intercom does not retry
+4. If `LEAD_TO_USER_CONVERSION_ENABLED` is **not** truthy (the default), the
+   handler logs and returns without touching Intercom — the lead stays a lead
+   and keeps chatting.
+5. Only if conversion is explicitly enabled does it search for an existing user
+   (by the lead's id, then email), create one with email only if needed, merge
+   the lead in, and reassign the lead's id onto the surviving user. **This
+   breaks active Messenger sessions** (see warning above).
+6. Returns 200 so Intercom does not retry
 
 ### Inbound Call Timezone Inference
 
@@ -131,10 +139,11 @@ doctl serverless functions get intercom/webhook --url
 
 Set these in the DO Functions dashboard under your namespace:
 
-| Variable                  | Description                              |
-|---------------------------|------------------------------------------|
-| `INTERCOM_ACCESS_TOKEN`   | Intercom API bearer token                |
-| `WEBHOOK_SECRET`          | Intercom app client secret               |
+| Variable                          | Description                              |
+|-----------------------------------|------------------------------------------|
+| `INTERCOM_ACCESS_TOKEN`           | Intercom API bearer token                |
+| `WEBHOOK_SECRET`                  | Intercom app client secret               |
+| `LEAD_TO_USER_CONVERSION_ENABLED` | Optional. Set to `true` to enable server-side lead→user merge. **Off by default** because the merge breaks live Messenger sessions (see Lead-to-User section). |
 
 ### Intercom Webhook Setup
 
