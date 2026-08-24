@@ -3,6 +3,52 @@
 DigitalOcean serverless functions for Edge. All Intercom webhooks are
 handled by a single `intercom/webhook` function that routes by topic.
 
+## Intercom article draft bridge
+
+`intercom-article-drafts/upload` is a small authenticated bridge for creating
+new Intercom drafts. The deployable v0 never updates, publishes, places, or
+deletes an article.
+
+Create a new draft:
+
+```json
+{
+  "operation": "create",
+  "operation_id": "kb-occurrence-0123456789abcdef",
+  "title": "How to reset 2FA",
+  "description": "Recovery steps for Edge accounts",
+  "body_markdown": "# How to reset 2FA\n\n..."
+}
+```
+
+Send requests as `POST` with
+`Authorization: Bearer $INTERCOM_DRAFT_BRIDGE_SECRET`. Parent placement and all
+existing-article operations are rejected in v0. A successful response includes
+the exact Intercom article identity, submitted-content hash, and audit fields
+needed by the caller and its post-draft review-link resolver:
+
+```json
+{
+  "ok": true,
+  "operation_id": "kb-occurrence-0123456789abcdef",
+  "operation": "create",
+  "result": "created",
+  "article_id": "987654",
+  "title": "How to reset 2FA",
+  "before_state": null,
+  "after_state": "draft",
+  "state": "draft",
+  "completed_at": "2026-08-24T22:00:00Z",
+  "submitted_content_hash": "<sha256>"
+}
+```
+
+The public Articles API does not expose Knowledge Hub's private
+`activeContentId`. The bridge therefore never guesses a review URL from
+`article_id` or `content_id`. The local Knowledge Base workflow resolves
+that ID after the mutation through an authenticated teammate-session search,
+then inserts it into the fixed review URL template.
+
 ## Webhook Handlers
 
 ### Lead-to-User Auto-Converter (DISABLED by default)
@@ -70,6 +116,9 @@ edge-serverless-functions/
 ├── .env.example                           # Template for local dev secrets
 ├── README.md
 └── packages/
+    ├── intercom-article-drafts/
+    │   ├── upload/                          # Create-only authenticated draft function
+    │   └── tests/                           # Draft-function contract tests
     └── intercom/
         ├── webhook/                        # Single deployed function
         │   ├── __main__.py                # Router: verify sig, dispatch by topic
@@ -122,7 +171,7 @@ if topic in YOUR_TOPICS:
 5. Add any new environment variables in the DO Functions dashboard and
    update `.env.example`.
 
-6. Deploy: `doctl serverless deploy . --remote-build`
+6. Deploy: `doctl serverless deploy . --remote-build --env .env`
 
 ## Deployment
 
@@ -131,19 +180,24 @@ Deploy via the `doctl` CLI:
 ```bash
 doctl auth init
 doctl serverless connect
-doctl serverless deploy . --remote-build
+doctl serverless deploy . --remote-build --env .env
 doctl serverless functions get intercom/webhook --url
 ```
 
 ### Required DigitalOcean Environment Variables
 
-Set these in the DO Functions dashboard under your namespace:
+For CLI deployments, put every `${NAME}` referenced by `project.yml` in the
+repository-root `.env` used by `doctl serverless deploy . --remote-build --env
+.env`. Do not rely on dashboard edits; a later CLI deploy can replace them.
 
 | Variable                          | Description                              |
 |-----------------------------------|------------------------------------------|
 | `INTERCOM_ACCESS_TOKEN`           | Intercom API bearer token                |
 | `WEBHOOK_SECRET`                  | Intercom app client secret               |
 | `LEAD_TO_USER_CONVERSION_ENABLED` | Optional. Set to `true` to enable server-side lead→user merge. **Off by default** because the merge breaks live Messenger sessions (see Lead-to-User section). |
+| `INTERCOM_ARTICLE_ACCESS_TOKEN`    | Intercom token with article read/write access for the draft bridge. |
+| `INTERCOM_DRAFT_BRIDGE_SECRET`     | Random bearer secret required by the draft bridge. |
+| `INTERCOM_ARTICLE_AUTHOR_ID`       | Intercom teammate/admin ID used as the article author. |
 
 ### Intercom Webhook Setup
 
@@ -161,7 +215,7 @@ function URL and subscribe to these topics:
 
 ```bash
 pip install pytest requests phonenumbers
-pytest packages/intercom/tests/ -v
+pytest packages/intercom-article-drafts/tests/ packages/intercom/tests/ -v
 ```
 
 ### Live local testing (real Intercom webhooks)
