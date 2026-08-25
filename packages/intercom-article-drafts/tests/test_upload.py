@@ -14,7 +14,7 @@ spec.loader.exec_module(upload)
 
 @pytest.fixture(autouse=True)
 def env(monkeypatch):
-    monkeypatch.setenv("INTERCOM_ARTICLE_ACCESS_TOKEN", "intercom-token")
+    monkeypatch.setenv("INTERCOM_ACCESS_TOKEN", "shared-intercom-token")
     monkeypatch.setenv("INTERCOM_DRAFT_BRIDGE_SECRET", "bridge-secret-value")
     monkeypatch.setenv("INTERCOM_ARTICLE_AUTHOR_ID", "12345")
 
@@ -78,8 +78,10 @@ def test_create_forces_draft_and_returns_draft_identity():
     assert re.fullmatch(r"[0-9a-f]{64}", receipt["submitted_content_hash"])
     assert receipt["completed_at"].endswith("Z")
     payload = request.call_args.kwargs["json"]
+    headers = request.call_args.kwargs["headers"]
     assert payload["state"] == "draft"
     assert payload["author_id"] == 12345
+    assert headers["Authorization"] == "Bearer shared-intercom-token"
     assert request.call_args.args[:2] == ("POST", "https://api.intercom.io/articles")
 
 

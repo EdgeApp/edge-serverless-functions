@@ -7,7 +7,9 @@ handled by a single `intercom/webhook` function that routes by topic.
 
 `intercom-article-drafts/upload` is a small authenticated bridge for creating
 new Intercom drafts. The deployable v0 never updates, publishes, places, or
-deletes an article.
+deletes an article. It deliberately reuses the existing Intercom app token
+already supplied to `intercom/webhook`; that app must retain `Read and write
+articles` permission.
 
 Create a new draft:
 
@@ -192,10 +194,9 @@ repository-root `.env` used by `doctl serverless deploy . --remote-build --env
 
 | Variable                          | Description                              |
 |-----------------------------------|------------------------------------------|
-| `INTERCOM_ACCESS_TOKEN`           | Intercom API bearer token                |
+| `INTERCOM_ACCESS_TOKEN`           | Shared Intercom app bearer token for the webhook and draft broker; requires article read/write permission. |
 | `WEBHOOK_SECRET`                  | Intercom app client secret               |
 | `LEAD_TO_USER_CONVERSION_ENABLED` | Optional. Set to `true` to enable server-side lead→user merge. **Off by default** because the merge breaks live Messenger sessions (see Lead-to-User section). |
-| `INTERCOM_ARTICLE_ACCESS_TOKEN`    | Intercom token with article read/write access for the draft bridge. |
 | `INTERCOM_DRAFT_BRIDGE_SECRET`     | Random bearer secret required by the draft bridge. |
 | `INTERCOM_ARTICLE_AUTHOR_ID`       | Intercom teammate/admin ID used as the article author. |
 

@@ -32,7 +32,7 @@ def _response(status_code, body):
 
 def _headers():
     return {
-        "Authorization": f"Bearer {os.environ['INTERCOM_ARTICLE_ACCESS_TOKEN']}",
+        "Authorization": f"Bearer {os.environ['INTERCOM_ACCESS_TOKEN']}",
         "Accept": "application/json",
         "Content-Type": "application/json",
         "Intercom-Version": API_VERSION,
