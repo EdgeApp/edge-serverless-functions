@@ -9,7 +9,7 @@ packages:
         runtime: python:3.12
         web: raw
         limits:
-          timeout: 15000
+          timeout: 45000
           memory: 256
   - name: intercom
     environment:
