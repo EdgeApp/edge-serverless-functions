@@ -186,6 +186,35 @@ def test_create_forces_draft_and_returns_identity():
     assert 0 < read_timeout <= upload.READ_TIMEOUT_SECONDS
 
 
+def test_create_accepts_intercom_generated_heading_anchor_in_readback():
+    created = article(
+        body_markdown="# Reset 2FA {#h_0d8a2f2ea4}\n\nDo the thing.\n"
+    )
+    with patch.object(upload.requests, "request", return_value=response(created)):
+        result = upload.main(event(create_payload()), None)
+
+    assert result["statusCode"] == 200
+    assert body(result)["result"] == "created"
+
+
+@pytest.mark.parametrize(
+    "returned_markdown",
+    [
+        "# Reset 2FA {#custom}\n\nDo the thing.",
+        "# Reset 2FA {#h_0d8a2f2ea}\n\nDo the thing.",
+        "# Reset 2FA {#h_0d8a2f2ea44}\n\nDo the thing.",
+        "# Changed heading {#h_0d8a2f2ea4}\n\nDo the thing.",
+        "# Reset 2FA\n\nDo the thing. {#h_0d8a2f2ea4}",
+    ],
+)
+def test_create_rejects_non_intercom_heading_canonicalization(returned_markdown):
+    created = article(body_markdown=returned_markdown)
+    with patch.object(upload.requests, "request", return_value=response(created)):
+        result = upload.main(event(create_payload()), None)
+
+    assert_reconciliation(result, "9001")
+
+
 def test_create_reconciles_if_intercom_returns_the_wrong_author():
     created = article(author_id=54321)
     with patch.object(upload.requests, "request", return_value=response(created)):
@@ -238,6 +267,24 @@ def test_update_routes_unpublished_article_through_normal_update_and_readback():
     sent = calls[1].kwargs["json"]
     assert sent["author_id"] == 12345
     assert "state" not in sent
+
+
+def test_unpublished_update_accepts_intercom_generated_heading_anchor_in_readback():
+    old = article()
+    updated = article(
+        title="Reset 2FA safely",
+        description="Current recovery steps",
+        body_markdown="# Reset 2FA safely {#h_e8e69bf58e}\n\nDo the safer thing.\n"
+    )
+    with patch.object(
+        upload.requests,
+        "request",
+        side_effect=[response(old), response(updated), response(updated)],
+    ):
+        result = upload.main(event(update_payload()), None)
+
+    assert result["statusCode"] == 200
+    assert body(result)["result"] == "updated_draft"
 
 
 def test_unpublished_update_reconciles_if_readback_has_the_wrong_author():
@@ -314,6 +361,33 @@ def test_update_routes_published_article_through_staged_draft_endpoint():
         ("GET", "https://api.intercom.io/articles/9001"),
     ]
     assert "state" not in calls[2].kwargs["json"]
+
+
+def test_published_update_accepts_intercom_generated_heading_anchor_in_readback():
+    live = article(state="published")
+    staged = article(
+        title="Reset 2FA safely",
+        description="Current recovery steps",
+        state="published",
+        pending=True,
+        body_markdown="# Reset 2FA safely {#h_deadbeef00}\n\nDo the safer thing.\n",
+    )
+    live_after = {**live, "has_unpublished_changes": True, "draft_updated_at": 1700000100}
+    with patch.object(
+        upload.requests,
+        "request",
+        side_effect=[
+            response(live),
+            response(live),
+            response(staged),
+            response(staged),
+            response(live_after),
+        ],
+    ):
+        result = upload.main(event(update_payload()), None)
+
+    assert result["statusCode"] == 200
+    assert body(result)["result"] == "staged_draft"
 
 
 def test_published_update_reconciles_if_staged_readback_has_the_wrong_author():

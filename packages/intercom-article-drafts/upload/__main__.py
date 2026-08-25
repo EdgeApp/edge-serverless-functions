@@ -228,6 +228,31 @@ def _normalized_markdown(markdown):
     return markdown.replace("\r\n", "\n").rstrip("\n")
 
 
+def _markdown_matches_intercom_readback(submitted, returned):
+    expected = _normalized_markdown(submitted)
+    actual = _normalized_markdown(returned)
+    if expected is None or actual is None:
+        return False
+    if expected == actual:
+        return True
+
+    expected_lines = expected.split("\n")
+    actual_lines = actual.split("\n")
+    if len(expected_lines) != len(actual_lines):
+        return False
+
+    for expected_line, actual_line in zip(expected_lines, actual_lines):
+        if expected_line == actual_line:
+            continue
+        if not re.fullmatch(r" {0,3}#{1,6}[ \t]+\S.*", expected_line):
+            return False
+        if not re.fullmatch(
+            re.escape(expected_line) + r" \{#h_[0-9a-f]{10}\}", actual_line
+        ):
+            return False
+    return True
+
+
 def _verify_identity(article, expected_id=None):
     article_id = _positive_ascii_id(article.get("id"))
     if article_id is None:
@@ -244,8 +269,8 @@ def _verify_content(article, fields):
         raise RequestError(502, "Intercom did not preserve the submitted title")
     if "description" in fields and article.get("description") != fields["description"]:
         raise RequestError(502, "Intercom did not preserve the submitted description")
-    if _normalized_markdown(article.get("body_markdown")) != _normalized_markdown(
-        fields["body_markdown"]
+    if not _markdown_matches_intercom_readback(
+        fields["body_markdown"], article.get("body_markdown")
     ):
         raise RequestError(502, "Intercom did not preserve the submitted Markdown")
 
