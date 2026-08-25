@@ -1,4 +1,16 @@
 packages:
+  - name: intercom-article-drafts
+    environment:
+      INTERCOM_ACCESS_TOKEN: ${INTERCOM_ACCESS_TOKEN}
+      INTERCOM_DRAFT_BRIDGE_SECRET: ${INTERCOM_DRAFT_BRIDGE_SECRET}
+      INTERCOM_ARTICLE_AUTHOR_ID: "${INTERCOM_ARTICLE_AUTHOR_ID}"
+    functions:
+      - name: upload
+        runtime: python:3.12
+        web: raw
+        limits:
+          timeout: 45000
+          memory: 256
   - name: intercom
     environment:
       INTERCOM_ACCESS_TOKEN: ${INTERCOM_ACCESS_TOKEN}
