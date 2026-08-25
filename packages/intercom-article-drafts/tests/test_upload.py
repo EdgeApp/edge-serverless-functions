@@ -2,11 +2,13 @@ import importlib.util
 import json
 import os
 import re
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 FUNCTION = os.path.join(os.path.dirname(__file__), "..", "upload", "__main__.py")
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location("article_draft_upload", FUNCTION)
 upload = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(upload)
@@ -39,6 +41,16 @@ def response(data, status=200):
 
 def body(result):
     return json.loads(result["body"])
+
+
+def test_numeric_author_id_placeholder_is_quoted_in_project_manifest():
+    manifest = (PROJECT_ROOT / "project.yml").read_text()
+
+    assert re.search(
+        r'^\s+INTERCOM_ARTICLE_AUTHOR_ID:\s+"\$\{INTERCOM_ARTICLE_AUTHOR_ID\}"\s*$',
+        manifest,
+        re.MULTILINE,
+    )
 
 
 def test_create_forces_draft_and_returns_draft_identity():
