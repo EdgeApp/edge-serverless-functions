@@ -141,6 +141,36 @@ def _get_admin_id() -> str:
     return _cached_admin_id
 
 
+def get_conversation(conversation_id: str) -> dict:
+    """GET a conversation for call-note receipt checks."""
+    resp = requests.get(
+        f"{BASE_URL}/conversations/{conversation_id}",
+        headers=_headers(),
+        timeout=10,
+    )
+    resp.raise_for_status()
+    conversation = resp.json()
+    if not isinstance(conversation, dict):
+        raise ValueError("Intercom returned a malformed conversation")
+    return conversation
+
+
+def conversation_contains_note_marker(conversation: dict, marker: str) -> bool:
+    """Return whether a conversation contains the exact note marker."""
+    container = conversation.get("conversation_parts")
+    if not isinstance(container, dict):
+        raise ValueError("Intercom conversation is missing conversation_parts")
+    parts = container.get("conversation_parts")
+    if not isinstance(parts, list):
+        raise ValueError("Intercom conversation parts are malformed")
+    return any(
+        isinstance(part, dict)
+        and isinstance(part.get("body"), str)
+        and marker in part["body"]
+        for part in parts
+    )
+
+
 def create_conversation_note(conversation_id: str, body: str) -> dict:
     """POST /conversations/{id}/parts — add an internal note to a conversation."""
     admin_id = _get_admin_id()

@@ -25,14 +25,17 @@ INTERCOM_TOKEN = "fake-token"
 
 
 def _make_call_payload(phone="+12125551234", contact_id="contact_abc", direction="inbound",
-                       conversation_id="conv_123", topic="call.started"):
+                       conversation_id="conv_123", topic="call.started",
+                       call_id="call_123", delivery_attempts=1):
     return {
         "type": "notification_event",
         "topic": topic,
+        "delivery_attempts": delivery_attempts,
         "data": {
             "type": "notification_event_data",
             "item": {
                 "type": "call",
+                "id": call_id,
                 "phone": phone,
                 "contact_id": contact_id,
                 "conversation_id": conversation_id,
@@ -91,6 +94,16 @@ def _mock_ok_response(data=None):
     resp.json.return_value = data or {}
     resp.raise_for_status = MagicMock()
     return resp
+
+
+def _conversation_with_bodies(*bodies):
+    return {
+        "conversation_parts": {
+            "conversation_parts": [
+                {"part_type": "note", "body": body} for body in bodies
+            ]
+        }
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -262,6 +275,7 @@ class TestHandlerFlow:
         note_body = note_call[1]["json"]["body"]
         assert "America/" in note_body
         assert "212" in note_body
+        assert "[edge-call-location call_id=call_123]" in note_body
 
         assert mock_put.call_count == 1
         attr_call = mock_put.call_args
@@ -293,15 +307,99 @@ class TestHandlerFlow:
         assert result["statusCode"] == 200
         mock_post.assert_not_called()
 
-    def test_note_failure_does_not_block_attribute_update(self):
+    def test_note_failure_without_receipt_requests_retry_and_updates_attribute(self):
         event = _make_event(_make_call_payload())
-        with patch("intercom_client.requests.get", return_value=_mock_ok_response({"id": "admin_1"})), \
-             patch("intercom_client.requests.post", side_effect=Exception("API error")), \
-             patch("intercom_client.requests.put", return_value=_mock_ok_response()) as mock_put:
+        with patch(
+            "call_timezone.handler.create_conversation_note",
+            side_effect=Exception("response lost"),
+        ), patch(
+            "call_timezone.handler.get_conversation",
+            return_value=_conversation_with_bodies(),
+        ), patch(
+            "call_timezone.handler.update_contact_attributes"
+        ) as mock_update:
             result = handler.main(event, None)
 
-        assert result["statusCode"] == 200
-        assert mock_put.call_count == 1
+        assert result == {"statusCode": 500, "body": "Call note requires retry"}
+        assert mock_update.call_count == 1
+
+    def test_one_minute_retry_skips_note_when_receipt_exists(self):
+        marker = "[edge-call-location call_id=call_123]"
+        event = _make_event(_make_call_payload(delivery_attempts=2))
+        with patch(
+            "call_timezone.handler.get_conversation",
+            return_value=_conversation_with_bodies(marker),
+        ), patch(
+            "call_timezone.handler.create_conversation_note"
+        ) as mock_note, patch(
+            "call_timezone.handler.update_contact_attributes"
+        ) as mock_update:
+            result = handler.main(event, None)
+
+        assert result == {"statusCode": 200, "body": "OK"}
+        mock_note.assert_not_called()
+        assert mock_update.call_count == 1
+
+    def test_retry_creates_note_when_exact_receipt_is_absent(self):
+        event = _make_event(_make_call_payload(delivery_attempts=2))
+        with patch(
+            "call_timezone.handler.get_conversation",
+            return_value=_conversation_with_bodies(
+                "[edge-call-location call_id=call_old]"
+            ),
+        ), patch(
+            "call_timezone.handler.create_conversation_note"
+        ) as mock_note, patch(
+            "call_timezone.handler.update_contact_attributes"
+        ):
+            result = handler.main(event, None)
+
+        assert result == {"statusCode": 200, "body": "OK"}
+        assert mock_note.call_count == 1
+        assert "call_123" in mock_note.call_args.args[1]
+
+    def test_retry_receipt_check_failure_does_not_risk_duplicate_note(self):
+        event = _make_event(_make_call_payload(delivery_attempts=2))
+        with patch(
+            "call_timezone.handler.get_conversation",
+            side_effect=Exception("readback unavailable"),
+        ), patch(
+            "call_timezone.handler.create_conversation_note"
+        ) as mock_note, patch(
+            "call_timezone.handler.update_contact_attributes"
+        ) as mock_update:
+            result = handler.main(event, None)
+
+        assert result == {"statusCode": 500, "body": "Call note requires retry"}
+        mock_note.assert_not_called()
+        assert mock_update.call_count == 1
+
+    def test_ambiguous_note_write_is_covered_by_durable_receipt(self):
+        marker = "[edge-call-location call_id=call_123]"
+        event = _make_event(_make_call_payload())
+        with patch(
+            "call_timezone.handler.create_conversation_note",
+            side_effect=Exception("response lost"),
+        ), patch(
+            "call_timezone.handler.get_conversation",
+            return_value=_conversation_with_bodies(marker),
+        ), patch("call_timezone.handler.update_contact_attributes"):
+            result = handler.main(event, None)
+
+        assert result == {"statusCode": 200, "body": "OK"}
+
+    def test_missing_call_id_skips_note_but_updates_attribute(self):
+        event = _make_event(_make_call_payload(call_id=None))
+        with patch(
+            "call_timezone.handler.create_conversation_note"
+        ) as mock_note, patch(
+            "call_timezone.handler.update_contact_attributes"
+        ) as mock_update:
+            result = handler.main(event, None)
+
+        assert result == {"statusCode": 200, "body": "OK"}
+        mock_note.assert_not_called()
+        assert mock_update.call_count == 1
 
     def test_attribute_failure_still_returns_200(self):
         event = _make_event(_make_call_payload())
