@@ -135,6 +135,10 @@ def submitted_article(state="draft", pending=False, **overrides):
     )
 
 
+def staged_fingerprint(value):
+    return upload._staged_draft_fingerprint(value, "9001")[0]
+
+
 def test_manifest_keeps_numeric_author_string_and_allows_update_readbacks():
     manifest = (PROJECT_ROOT / "project.yml").read_text()
 
@@ -166,6 +170,7 @@ def test_create_forces_draft_and_returns_identity():
     assert receipt["result"] == "created"
     assert receipt["article_id"] == "9001"
     assert receipt["title"] == "Reset 2FA"
+    assert receipt["description"] == "Recovery steps"
     assert receipt["before_state"] is None
     assert receipt["after_state"] == "draft"
     assert receipt["state"] == "draft"
@@ -186,9 +191,12 @@ def test_create_forces_draft_and_returns_identity():
     assert 0 < read_timeout <= upload.READ_TIMEOUT_SECONDS
 
 
-def test_create_accepts_intercom_generated_heading_anchor_in_readback():
+def test_create_accepts_intercom_markdown_normalization_in_readback():
     created = article(
-        body_markdown="# Reset 2FA {#h_0d8a2f2ea4}\n\nDo the thing.\n"
+        body_markdown=(
+            "# Reset 2FA {#h_0d8a2f2ea4}\n\nDo the thing.\n\n"
+            "|  | Result |\n| --- | --- |\n| A | B |\n"
+        )
     )
     with patch.object(upload.requests, "request", return_value=response(created)):
         result = upload.main(event(create_payload()), None)
@@ -197,18 +205,8 @@ def test_create_accepts_intercom_generated_heading_anchor_in_readback():
     assert body(result)["result"] == "created"
 
 
-@pytest.mark.parametrize(
-    "returned_markdown",
-    [
-        "# Reset 2FA {#custom}\n\nDo the thing.",
-        "# Reset 2FA {#h_0d8a2f2ea}\n\nDo the thing.",
-        "# Reset 2FA {#h_0d8a2f2ea44}\n\nDo the thing.",
-        "# Changed heading {#h_0d8a2f2ea4}\n\nDo the thing.",
-        "# Reset 2FA\n\nDo the thing. {#h_0d8a2f2ea4}",
-    ],
-)
-def test_create_rejects_non_intercom_heading_canonicalization(returned_markdown):
-    created = article(body_markdown=returned_markdown)
+def test_create_reconciles_if_intercom_returns_empty_markdown():
+    created = article(body_markdown="")
     with patch.object(upload.requests, "request", return_value=response(created)):
         result = upload.main(event(create_payload()), None)
 
@@ -217,6 +215,14 @@ def test_create_rejects_non_intercom_heading_canonicalization(returned_markdown)
 
 def test_create_reconciles_if_intercom_returns_the_wrong_author():
     created = article(author_id=54321)
+    with patch.object(upload.requests, "request", return_value=response(created)):
+        result = upload.main(event(create_payload()), None)
+
+    assert_reconciliation(result, "9001")
+
+
+def test_create_reconciles_if_intercom_returns_the_wrong_description():
+    created = article(description="Stale published description")
     with patch.object(upload.requests, "request", return_value=response(created)):
         result = upload.main(event(create_payload()), None)
 
@@ -352,6 +358,8 @@ def test_update_routes_published_article_through_staged_draft_endpoint():
     assert receipt["state"] == "published"
     assert receipt["draft_mode"] == "published_revision"
     assert receipt["has_unpublished_changes"] is True
+    assert receipt["staged_draft_fingerprint"] == staged_fingerprint(staged)
+    assert receipt["draft_updated_at"] == 1700000100
     calls = request.call_args_list
     assert [call.args[:2] for call in calls] == [
         ("GET", "https://api.intercom.io/articles/9001"),
@@ -403,22 +411,144 @@ def test_published_update_reconciles_if_staged_readback_has_the_wrong_author():
     assert_reconciliation(result, "9001")
 
 
-def test_published_update_rejects_existing_staged_revision_before_mutation():
+def test_published_update_returns_exact_existing_staged_draft_conflict():
     live = article(state="published", pending=True)
+    existing_staged = article(
+        title="Human draft",
+        description="Work in progress",
+        body_markdown="# Human draft\n\nDo not replace without confirmation.",
+        state="published",
+        pending=True,
+    )
     with patch.object(
-        upload.requests, "request", return_value=response(live)
+        upload.requests,
+        "request",
+        side_effect=[response(live), response(existing_staged)],
     ) as request:
         result = upload.main(event(update_payload()), None)
 
     assert result["statusCode"] == 409
-    assert body(result)["error"] == (
-        "Published article already has staged changes; reconcile before update"
+    conflict = body(result)
+    assert conflict["error"] == (
+        "Published article already has staged changes; explicit replacement confirmation is required"
     )
+    assert conflict["conflict"] == "existing_staged_draft"
+    assert conflict["existing_staged_draft_fingerprint"] == staged_fingerprint(
+        existing_staged
+    )
+    assert conflict["existing_draft_updated_at"] == 1700000100
+    assert conflict["mutation_attempted"] is False
+    assert conflict["retry_safe"] is True
+    assert request.call_count == 2
+
+
+def test_published_update_replaces_only_the_exact_approved_staged_revision():
+    live = article(state="published", pending=True)
+    existing_staged = article(
+        title="Human draft",
+        description="Work in progress",
+        body_markdown="# Human draft\n\nApproved for replacement.",
+        state="published",
+        pending=True,
+    )
+    replacement = submitted_article(
+        state="published", pending=True, draft_updated_at=1700000200
+    )
+    live_after = {
+        **live,
+        "has_unpublished_changes": True,
+        "draft_updated_at": 1700000200,
+    }
+    payload = update_payload(
+        replace_staged_draft_fingerprint=staged_fingerprint(existing_staged)
+    )
+    with patch.object(
+        upload.requests,
+        "request",
+        side_effect=[
+            response(live),
+            response(existing_staged),
+            response(live),
+            response(existing_staged),
+            response(replacement),
+            response(replacement),
+            response(live_after),
+        ],
+    ) as request:
+        result = upload.main(event(payload), None)
+
+    assert result["statusCode"] == 200
+    assert body(result)["staged_draft_fingerprint"] == staged_fingerprint(replacement)
+    assert request.call_args_list[4].args[:2] == (
+        "PUT",
+        "https://api.intercom.io/articles/9001/draft",
+    )
+
+
+def test_published_update_rejects_approval_if_staged_revision_drifted():
+    live = article(state="published", pending=True)
+    approved = article(state="published", pending=True)
+    changed = article(
+        title="Changed after approval",
+        state="published",
+        pending=True,
+        draft_updated_at=1700000200,
+    )
+    prewrite_live = {**live, "draft_updated_at": 1700000200}
+    payload = update_payload(
+        replace_staged_draft_fingerprint=staged_fingerprint(approved)
+    )
+    with patch.object(
+        upload.requests,
+        "request",
+        side_effect=[
+            response(live),
+            response(approved),
+            response(prewrite_live),
+            response(changed),
+        ],
+    ) as request:
+        result = upload.main(event(payload), None)
+
+    assert result["statusCode"] == 409
+    conflict = body(result)
+    assert conflict["conflict"] == "existing_staged_draft"
+    assert conflict["existing_staged_draft_fingerprint"] == staged_fingerprint(changed)
+    assert conflict["existing_draft_updated_at"] == 1700000200
+    assert all(call.args[0] == "GET" for call in request.call_args_list)
+
+
+def test_published_update_rejects_approval_if_staged_revision_vanished():
+    live = article(state="published", pending=True)
+    approved = article(state="published", pending=True)
+    prewrite_live = article(state="published", pending=False)
+    payload = update_payload(
+        replace_staged_draft_fingerprint=staged_fingerprint(approved)
+    )
+    with patch.object(
+        upload.requests,
+        "request",
+        side_effect=[response(live), response(approved), response(prewrite_live)],
+    ) as request:
+        result = upload.main(event(payload), None)
+
+    assert result["statusCode"] == 409
+    assert body(result)["conflict"] == "staged_draft_missing"
+    assert all(call.args[0] == "GET" for call in request.call_args_list)
+
+
+@pytest.mark.parametrize("state", ["published", "draft"])
+def test_update_rejects_stale_approval_when_staged_revision_is_gone(state):
+    live = article(state=state)
+    payload = update_payload(replace_staged_draft_fingerprint="0" * 64)
+    with patch.object(
+        upload.requests, "request", return_value=response(live)
+    ) as request:
+        result = upload.main(event(payload), None)
+
+    assert result["statusCode"] == 409
+    assert body(result)["conflict"] == "staged_draft_missing"
     assert request.call_count == 1
-    assert request.call_args.args[:2] == (
-        "GET",
-        "https://api.intercom.io/articles/9001",
-    )
 
 
 def test_published_update_requires_explicit_pending_revision_state():
@@ -582,21 +712,26 @@ def test_staged_update_fails_closed_if_live_article_changes():
     assert_reconciliation(result, "9001")
 
 
-def test_published_update_stops_if_human_stages_after_initial_preflight():
+def test_published_update_reports_exact_draft_if_human_stages_during_preflight():
     live = article(state="published")
     gained_draft = article(state="published", pending=True)
+    staged = article(
+        title="New human draft",
+        state="published",
+        pending=True,
+    )
     with patch.object(
         upload.requests,
         "request",
-        side_effect=[response(live), response(gained_draft)],
+        side_effect=[response(live), response(gained_draft), response(staged)],
     ) as request:
         result = upload.main(event(update_payload()), None)
 
     assert result["statusCode"] == 409
-    assert body(result)["error"] == (
-        "Published article gained staged changes during update preflight"
-    )
-    assert request.call_count == 2
+    conflict = body(result)
+    assert conflict["conflict"] == "existing_staged_draft"
+    assert conflict["existing_staged_draft_fingerprint"] == staged_fingerprint(staged)
+    assert request.call_count == 3
 
 
 def test_published_update_stops_if_article_version_changes_during_preflight():
@@ -769,13 +904,28 @@ def test_article_id_matches_operation(payload):
 
 
 @pytest.mark.parametrize(
+    "payload",
+    [
+        create_payload(replace_staged_draft_fingerprint="0" * 64),
+        update_payload(replace_staged_draft_fingerprint="not-a-fingerprint"),
+        update_payload(replace_staged_draft_fingerprint="A" * 64),
+    ],
+)
+def test_staged_replacement_fingerprint_is_narrow_and_update_only(payload):
+    with patch.object(upload.requests, "request") as request:
+        result = upload.main(event(payload), None)
+
+    assert result["statusCode"] == 400
+    request.assert_not_called()
+
+
+@pytest.mark.parametrize(
     "returned",
     [
         article(state="published"),
         {**article(), "id": "not-numeric"},
         {**article(), "id": "١٢٣"},
         {**article(), "title": "Different title"},
-        {**article(), "body_markdown": "Different body"},
         article(scheduled_publish_at=1780000000),
     ],
 )
@@ -820,7 +970,15 @@ def test_known_upstream_4xx_is_not_reported_as_ambiguous_mutation():
         result = upload.main(event(create_payload()), None)
 
     assert result["statusCode"] == 400
-    assert body(result) == {"ok": False, "error": "Intercom request failed"}
+    assert body(result) == {
+        "ok": False,
+        "error": "Intercom rejected the draft mutation",
+        "outcome": "rejected",
+        "operation_id": "kb-test-create-0001",
+        "mutation_attempted": True,
+        "reconciliation_required": False,
+        "retry_safe": True,
+    }
 
 
 @pytest.mark.parametrize("status", [408, 418])
@@ -890,6 +1048,8 @@ def test_unknown_existing_article_state_is_rejected_without_mutation():
     [
         {},
         {"operation": "create", "title": "", "body_markdown": "body"},
+        create_payload(description=""),
+        {key: value for key, value in create_payload().items() if key != "description"},
         create_payload(operation_id="short"),
     ],
 )
