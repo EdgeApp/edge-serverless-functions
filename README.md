@@ -32,6 +32,8 @@ Create a new draft:
 
 Send requests as `POST` with
 `Authorization: Bearer $INTERCOM_DRAFT_BRIDGE_SECRET`.
+`description` is required; Intercom renders it as the short line directly
+beneath the article title.
 
 Update a known article by its exact Intercom article ID:
 
@@ -52,9 +54,15 @@ through `PUT /articles/{id}` and read back as an unpublished draft. A
 through the staged-draft endpoint, and checked again to ensure the live article
 did not change. A published article that already has staged unpublished changes
 at either the initial read or the immediate version-bound prewrite read is
-rejected with `409`. Any target with an existing publish or unpublish schedule
-is likewise rejected before mutation, and every post-mutation readback must
-remain unscheduled.
+returned as a non-mutating `409` with its exact fingerprint and update time. A
+caller may retry with that fingerprint in
+`replace_staged_draft_fingerprint`; the broker re-reads immediately before the
+write and rejects any drift. A caller can supply a fingerprint from its last
+committed broker receipt or from an explicit human approval; this bridge does
+not infer ownership. Intercom author identity is not treated as ownership
+proof. Any target with an existing publish or unpublish schedule is likewise
+rejected before mutation, and every post-mutation readback must remain
+unscheduled.
 
 A human publishing or scheduling a never-published draft in the short window
 between its initial read and update is an explicitly accepted operational race.
@@ -86,6 +94,7 @@ caller and its post-draft review-link resolver:
   "result": "created",
   "article_id": "987654",
   "title": "How to reset 2FA",
+  "description": "Recovery steps for Edge accounts",
   "before_state": null,
   "after_state": "draft",
   "state": "draft",
@@ -97,9 +106,17 @@ caller and its post-draft review-link resolver:
 
 For updates, `result` is `updated_draft` or `staged_draft`; the latter reports
 `after_state: published_with_draft`, `state: published`, and
-`has_unpublished_changes: true`. The broker never exposes a publish, delete,
-placement, or scheduling operation, and rejects every request field outside its
-small content-and-identity allowlist.
+`has_unpublished_changes: true`, plus the exact remote
+`staged_draft_fingerprint` and `draft_updated_at` that may authorize a later
+replacement. The broker never exposes a publish, delete, placement, or
+scheduling operation, and rejects every request field outside its small
+content-and-identity allowlist.
+
+Readback binds the exact article ID, state, title, description, and author. The
+returned Markdown must remain non-empty and preserve requested registered rich
+directives, but normal Intercom Markdown transformations such as generated
+heading anchors and table spacing do not invalidate an otherwise successful
+draft write.
 
 Each invocation starts a 30-second internal upstream deadline and uses short
 connect/read-inactivity timeouts inside DigitalOcean's 45-second hard function
@@ -112,6 +129,9 @@ is not idempotent: a lost `POST /articles` response may have created a draft
 without returning its ID. Never retry such an occurrence automatically; search
 and reconcile the exact operation/title before deciding whether another write
 is safe.
+By contrast, a deterministic 4xx response is returned as `outcome: rejected`
+with `retry_safe: true`; the caller may retry the same operation after the
+reported cause is cleared.
 
 The public Articles API does not expose Knowledge Hub's private
 `activeContentId`. The bridge therefore never guesses a review URL from

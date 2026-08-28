@@ -26,15 +26,18 @@ ALLOWED_PAYLOAD_FIELDS = {
     "description",
     "operation",
     "operation_id",
+    "replace_staged_draft_fingerprint",
     "title",
 }
 
 
 class RequestError(Exception):
-    def __init__(self, status_code, message):
+    def __init__(self, status_code, message, mutation_attempted=False, details=None):
         super().__init__(message)
         self.status_code = status_code
         self.message = message
+        self.mutation_attempted = mutation_attempted
+        self.details = details or {}
 
 
 class ReconciliationRequired(Exception):
@@ -93,7 +96,11 @@ def _mutation_request(method, path, payload, deadline, operation_id, article_id=
     except requests.RequestException as error:
         status = error.response.status_code if error.response is not None else None
         if status in DETERMINISTIC_MUTATION_STATUSES:
-            raise
+            raise RequestError(
+                status,
+                "Intercom rejected the draft mutation",
+                mutation_attempted=True,
+            )
         # Timeouts, connection loss, 5xx, 408, and unclassified responses do not
         # prove that the write failed. Re-raise only explicitly deterministic
         # rejection statuses; every other mutation outcome requires reconciliation.
@@ -192,17 +199,16 @@ def _article_fields(payload):
         "author_id": _author_id(),
     }
     description = payload.get("description")
-    if description is not None:
-        if not isinstance(description, str):
-            raise RequestError(400, "description must be a string")
-        fields["description"] = description
+    if not isinstance(description, str) or not description.strip():
+        raise RequestError(400, "description is required")
+    fields["description"] = description.strip()
     return fields
 
 
 def _content_hash(payload):
     content = {
         "body_markdown": payload["body_markdown"],
-        "description": payload.get("description"),
+        "description": payload["description"].strip(),
         "title": payload["title"].strip(),
     }
     try:
@@ -214,43 +220,24 @@ def _content_hash(payload):
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _replacement_fingerprint(payload):
+    value = payload.get("replace_staged_draft_fingerprint")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise RequestError(
+            400,
+            "replace_staged_draft_fingerprint must be a lowercase SHA-256",
+        )
+    return value
+
+
 def _rich_openings(markdown):
     return {
         line.strip()
         for line in markdown.splitlines()
         if line.strip().startswith(":::") and line.strip() != ":::"
     }
-
-
-def _normalized_markdown(markdown):
-    if not isinstance(markdown, str):
-        return None
-    return markdown.replace("\r\n", "\n").rstrip("\n")
-
-
-def _markdown_matches_intercom_readback(submitted, returned):
-    expected = _normalized_markdown(submitted)
-    actual = _normalized_markdown(returned)
-    if expected is None or actual is None:
-        return False
-    if expected == actual:
-        return True
-
-    expected_lines = expected.split("\n")
-    actual_lines = actual.split("\n")
-    if len(expected_lines) != len(actual_lines):
-        return False
-
-    for expected_line, actual_line in zip(expected_lines, actual_lines):
-        if expected_line == actual_line:
-            continue
-        if not re.fullmatch(r" {0,3}#{1,6}[ \t]+\S.*", expected_line):
-            return False
-        if not re.fullmatch(
-            re.escape(expected_line) + r" \{#h_[0-9a-f]{10}\}", actual_line
-        ):
-            return False
-    return True
 
 
 def _verify_identity(article, expected_id=None):
@@ -267,16 +254,15 @@ def _verify_content(article, fields):
         raise RequestError(502, "Intercom did not preserve the submitted author")
     if article.get("title") != fields["title"]:
         raise RequestError(502, "Intercom did not preserve the submitted title")
-    if "description" in fields and article.get("description") != fields["description"]:
+    if article.get("description") != fields["description"]:
         raise RequestError(502, "Intercom did not preserve the submitted description")
-    if not _markdown_matches_intercom_readback(
-        fields["body_markdown"], article.get("body_markdown")
-    ):
-        raise RequestError(502, "Intercom did not preserve the submitted Markdown")
+    returned_markdown = article.get("body_markdown")
+    if not isinstance(returned_markdown, str) or not returned_markdown.strip():
+        raise RequestError(502, "Intercom returned an empty Markdown draft")
 
     expected_rich = _rich_openings(fields["body_markdown"])
     if expected_rich and not expected_rich.issubset(
-        _rich_openings(article["body_markdown"])
+        _rich_openings(returned_markdown)
     ):
         raise RequestError(502, "Intercom did not preserve requested rich formatting")
 
@@ -340,11 +326,65 @@ def _verify_draft(article, fields, expected_id=None):
 
 def _verify_staged(article, fields, expected_id):
     article_id = _verify_identity(article, expected_id)
-    if article.get("state") != "published" or _published_draft_status(article) is not True:
+    if (
+        article.get("state") != "published"
+        or _published_draft_status(article) is not True
+    ):
         raise RequestError(502, "Intercom did not confirm a staged published-article draft")
     _verify_unscheduled(article)
     _verify_content(article, fields)
     return article_id
+
+
+def _staged_draft_fingerprint(article, expected_id):
+    """Fingerprint the exact remote staged draft returned by Intercom."""
+    article_id = _verify_identity(article, expected_id)
+    if (
+        article.get("state") != "published"
+        or _published_draft_status(article) is not True
+    ):
+        raise RequestError(502, "Intercom did not confirm an existing staged revision")
+    _verify_unscheduled(article)
+
+    author_id = _positive_ascii_id(article.get("author_id"))
+    title = article.get("title")
+    description = article.get("description")
+    body_markdown = article.get("body_markdown")
+    draft_updated_at = _required_timestamp(article, "draft_updated_at")
+    if (
+        author_id is None
+        or not isinstance(title, str)
+        or (description is not None and not isinstance(description, str))
+        or not isinstance(body_markdown, str)
+    ):
+        raise RequestError(502, "Intercom staged-draft readback was incomplete")
+
+    encoded = json.dumps(
+        {
+            "article_id": article_id,
+            "author_id": author_id,
+            "body_markdown": body_markdown,
+            "description": description,
+            "draft_updated_at": draft_updated_at,
+            "title": title,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest(), draft_updated_at
+
+
+def _staged_draft_conflict(fingerprint, draft_updated_at):
+    return RequestError(
+        409,
+        "Published article already has staged changes; explicit replacement confirmation is required",
+        details={
+            "conflict": "existing_staged_draft",
+            "existing_staged_draft_fingerprint": fingerprint,
+            "existing_draft_updated_at": draft_updated_at,
+        },
+    )
 
 
 def _live_snapshot(article, include_version=False):
@@ -379,6 +419,10 @@ def _live_snapshot(article, include_version=False):
 def _create(payload, deadline):
     if "article_id" in payload:
         raise RequestError(400, "article_id is not allowed for create")
+    if "replace_staged_draft_fingerprint" in payload:
+        raise RequestError(
+            400, "replace_staged_draft_fingerprint is not allowed for create"
+        )
     fields = _article_fields(payload)
     fields["state"] = "draft"
     operation_id = _operation_id(payload)
@@ -402,12 +446,19 @@ def _update(payload, deadline):
     article_id = _article_id(payload, required=True)
     operation_id = _operation_id(payload)
     fields = _article_fields(payload)
+    replacement_fingerprint = _replacement_fingerprint(payload)
     existing = _request("GET", f"/articles/{article_id}", deadline)
     _verify_identity(existing, article_id)
     _verify_unscheduled(existing, status_code=409)
     before_state = existing.get("state")
 
     if before_state == "draft":
+        if replacement_fingerprint is not None:
+            raise RequestError(
+                409,
+                "The approved staged revision no longer exists",
+                details={"conflict": "staged_draft_missing"},
+            )
         _verify_unpublished_draft_status(existing)
         # Omitting state preserves an unpublished draft. This workflow accepts the
         # narrow race where a human could publish between this GET and PUT; the
@@ -436,13 +487,27 @@ def _update(payload, deadline):
 
     if before_state == "published":
         pending = _published_draft_status(existing)
-        if pending:
-            raise RequestError(
-                409,
-                "Published article already has staged changes; reconcile before update",
-            )
         live_before = _live_snapshot(existing)
         prewrite_before = _live_snapshot(existing, include_version=True)
+        approved_fingerprint = None
+
+        if pending:
+            staged_before = _request(
+                "GET", f"/articles/{article_id}/draft", deadline
+            )
+            approved_fingerprint, draft_updated_at = _staged_draft_fingerprint(
+                staged_before, article_id
+            )
+            if replacement_fingerprint != approved_fingerprint:
+                raise _staged_draft_conflict(
+                    approved_fingerprint, draft_updated_at
+                )
+        elif replacement_fingerprint is not None:
+            raise RequestError(
+                409,
+                "The approved staged revision no longer exists",
+                details={"conflict": "staged_draft_missing"},
+            )
 
         # Narrow the accepted human-edit race with an immediate, version-bound
         # read just before the staged-draft write. Intercom offers no conditional
@@ -453,11 +518,32 @@ def _update(payload, deadline):
         _verify_unscheduled(prewrite, status_code=409)
         if prewrite.get("state") != "published":
             raise RequestError(409, "Article state changed during update preflight")
-        if _published_draft_status(prewrite):
-            raise RequestError(
-                409,
-                "Published article gained staged changes during update preflight",
+        prewrite_pending = _published_draft_status(prewrite)
+        if pending:
+            if not prewrite_pending:
+                raise RequestError(
+                    409,
+                    "The approved staged revision no longer exists",
+                    details={"conflict": "staged_draft_missing"},
+                )
+            staged_prewrite = _request(
+                "GET", f"/articles/{article_id}/draft", deadline
             )
+            current_fingerprint, draft_updated_at = _staged_draft_fingerprint(
+                staged_prewrite, article_id
+            )
+            if current_fingerprint != approved_fingerprint:
+                raise _staged_draft_conflict(
+                    current_fingerprint, draft_updated_at
+                )
+        elif prewrite_pending:
+            staged_prewrite = _request(
+                "GET", f"/articles/{article_id}/draft", deadline
+            )
+            current_fingerprint, draft_updated_at = _staged_draft_fingerprint(
+                staged_prewrite, article_id
+            )
+            raise _staged_draft_conflict(current_fingerprint, draft_updated_at)
         if _live_snapshot(prewrite, include_version=True) != prewrite_before:
             raise RequestError(409, "Published article changed during update preflight")
 
@@ -473,6 +559,9 @@ def _update(payload, deadline):
             article = _request("GET", f"/articles/{article_id}/draft", deadline)
             _verify_staged(article, fields, article_id)
             staged_draft_updated_at = article["draft_updated_at"]
+            staged_draft_fingerprint, _ = _staged_draft_fingerprint(
+                article, article_id
+            )
             live_after = _request("GET", f"/articles/{article_id}", deadline)
             _verify_identity(live_after, article_id)
             if _published_draft_status(live_after) is not True:
@@ -497,6 +586,8 @@ def _update(payload, deadline):
             "state": "published",
             "draft_mode": "published_revision",
             "has_unpublished_changes": True,
+            "staged_draft_fingerprint": staged_draft_fingerprint,
+            "draft_updated_at": staged_draft_updated_at,
         }
 
     raise RequestError(409, "Article must be an unpublished draft or a published article")
@@ -504,6 +595,7 @@ def _update(payload, deadline):
 
 def main(event, context):
     deadline = time.monotonic() + REQUEST_BUDGET_SECONDS
+    payload = {}
     try:
         _authenticate(event)
         payload = _payload(event)
@@ -538,6 +630,7 @@ def main(event, context):
             "operation": operation,
             "article_id": str(article["id"]),
             "title": payload["title"].strip(),
+            "description": payload["description"].strip(),
             "completed_at": completed_at,
             "submitted_content_hash": submitted_content_hash,
             **outcome,
@@ -555,7 +648,25 @@ def main(event, context):
             body["article_id"] = error.article_id
         return _response(502, body)
     except RequestError as error:
-        return _response(error.status_code, {"ok": False, "error": error.message})
+        body = {"ok": False, "error": error.message}
+        body.update(error.details)
+        operation_id = payload.get("operation_id")
+        if isinstance(operation_id, str) and re.fullmatch(
+            r"[A-Za-z0-9._:-]{8,128}", operation_id
+        ):
+            body.update(
+                {
+                    "outcome": "rejected",
+                    "operation_id": operation_id,
+                    "mutation_attempted": error.mutation_attempted,
+                    "reconciliation_required": False,
+                    "retry_safe": True,
+                }
+            )
+            article_id = _positive_ascii_id(payload.get("article_id"))
+            if article_id is not None:
+                body["article_id"] = article_id
+        return _response(error.status_code, body)
     except requests.RequestException as error:
         status = error.response.status_code if error.response is not None else 502
         return _response(status, {"ok": False, "error": "Intercom request failed"})
