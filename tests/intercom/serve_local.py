@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import os
+from pathlib import Path
 import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -22,12 +23,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "webhook"))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+FUNC_DIR = PROJECT_ROOT / "packages" / "intercom" / "webhook"
+sys.path.insert(0, str(FUNC_DIR))
 
 import importlib.util
 spec = importlib.util.spec_from_file_location(
     "webhook_router",
-    os.path.join(os.path.dirname(__file__), "..", "webhook", "__main__.py"),
+    FUNC_DIR / "__main__.py",
 )
 handler_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(handler_module)

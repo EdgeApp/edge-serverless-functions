@@ -3,19 +3,22 @@ import hashlib
 import hmac
 import importlib.util
 import json
+from pathlib import Path
 import sys
-import os
 from unittest.mock import patch, MagicMock
 
 import pytest
 
-FUNC_DIR = os.path.join(os.path.dirname(__file__), "..", "webhook")
-sys.path.insert(0, FUNC_DIR)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+FUNC_DIR = PROJECT_ROOT / "packages" / "intercom" / "webhook"
+sys.path.insert(0, str(FUNC_DIR))
 
 import intercom_client as tz_intercom_client
 from call_timezone import timezone as tz_module
 
-spec = importlib.util.spec_from_file_location("webhook_router", os.path.join(FUNC_DIR, "__main__.py"))
+spec = importlib.util.spec_from_file_location(
+    "webhook_router", FUNC_DIR / "__main__.py"
+)
 handler = importlib.util.module_from_spec(spec)
 sys.modules["webhook_router"] = handler
 spec.loader.exec_module(handler)
