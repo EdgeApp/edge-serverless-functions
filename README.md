@@ -189,8 +189,9 @@ inbound calls only.
    libphonenumber) to determine country and timezone
 5. For US/CA numbers, uses the 3-digit area code to narrow to a specific
    timezone
-6. Creates an internal note on the contact with timezone details (visible in
-   all Inbox views)
+6. Creates an internal note on the contact with timezone details and a stable
+   call-ID receipt (visible in all Inbox views). On webhook retry, an existing
+   receipt suppresses the duplicate note.
 7. Sets an `inferred_timezone` custom attribute on the contact (filterable,
    usable in reports)
 
