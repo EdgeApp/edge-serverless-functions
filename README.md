@@ -141,9 +141,9 @@ then inserts it into the fixed review URL template.
 
 ### Draft-broker deployment scope
 
-Deploy the broker by its exact function path. Do not use the whole-project
-deployment examples later in this README for a broker-only release; DigitalOcean
-discovers immediate package subdirectories as actions.
+Deploy the broker by its exact function path. For a broker-only release, do not
+include the webhook; DigitalOcean discovers immediate package subdirectories as
+actions.
 
 ```bash
 doctl serverless deploy . \
@@ -223,27 +223,27 @@ edge-serverless-functions/
 ├── .env.example                           # Template for local dev secrets
 ├── README.md
 ├── packages/
-    ├── intercom-article-drafts/
-    │   └── upload/                          # Authenticated draft function
-    └── intercom/
-        ├── webhook/                        # Single deployed function
-        │   ├── __main__.py                # Router: verify sig, dispatch by topic
-        │   ├── intercom_client.py         # Shared Intercom API client
-        │   ├── requirements.txt           # Python dependencies
-        │   ├── build.sh                   # Dependency installer for DO
-        │   ├── lead_to_user/              # Lead-to-user handler
-        │   │   ├── __init__.py
-        │   │   └── handler.py
-        │   └── call_timezone/             # Call timezone handler
-        │       ├── __init__.py
-        │       ├── handler.py
-        │       └── timezone.py            # Phone → timezone inference
-        └── tests/                          # Dev/test (not deployed)
-            ├── test_webhook.py            # Lead-to-user tests
-            ├── test_call_timezone.py      # Call-timezone tests
-            ├── test_payload.json          # Sample webhook payload
-            └── serve_local.py             # Local dev server (ngrok)
+│   ├── intercom-article-drafts/
+│   │   └── upload/                        # Authenticated draft function
+│   └── intercom/
+│       └── webhook/                       # Single deployed function
+│           ├── __main__.py                # Router: verify sig, dispatch by topic
+│           ├── intercom_client.py         # Shared Intercom API client
+│           ├── requirements.txt           # Python dependencies
+│           ├── build.sh                   # Dependency installer for DO
+│           ├── lead_to_user/              # Lead-to-user handler
+│           │   ├── __init__.py
+│           │   └── handler.py
+│           └── call_timezone/             # Call timezone handler
+│               ├── __init__.py
+│               ├── handler.py
+│               └── timezone.py            # Phone → timezone inference
 └── tests/
+    ├── intercom/                           # Webhook tests and local harness
+    │   ├── test_webhook.py
+    │   ├── test_call_timezone.py
+    │   ├── test_payload.json
+    │   └── serve_local.py
     └── test_intercom_article_drafts.py     # Draft bridge + deploy-surface tests
 ```
 
@@ -279,24 +279,33 @@ if topic in YOUR_TOPICS:
 5. Add any new environment variables in the DO Functions dashboard and
    update `.env.example`.
 
-6. Deploy: `doctl serverless deploy . --remote-build --env .env`
+6. Deploy only the webhook action:
+   `doctl serverless deploy . --remote-build --env .env --include intercom/webhook`
 
 ## Deployment
 
-Deploy via the `doctl` CLI:
+Deploy via the `doctl` CLI. Always include the exact intended action paths;
+DigitalOcean auto-discovers every immediate directory below `packages/<package>`
+as a function candidate, even when it is absent from `project.yml`.
+Use one exact path for a single-function release or a comma-separated list for a
+combined release. Never run a production deployment without `--include`.
 
 ```bash
 doctl auth init
 doctl serverless connect
-doctl serverless deploy . --remote-build --env .env
+doctl serverless deploy . \
+  --remote-build \
+  --env .env \
+  --include intercom/webhook,intercom-article-drafts/upload
 doctl serverless functions get intercom/webhook --url
+doctl serverless functions get intercom-article-drafts/upload --url
 ```
 
 ### Required DigitalOcean Environment Variables
 
 For CLI deployments, put every `${NAME}` referenced by `project.yml` in the
-repository-root `.env` used by `doctl serverless deploy . --remote-build --env
-.env`. Do not rely on dashboard edits; a later CLI deploy can replace them.
+repository-root `.env` supplied to the exact action-scoped deployment. Do not
+rely on dashboard edits; a later CLI deploy can replace them.
 
 | Variable                          | Description                              |
 |-----------------------------------|------------------------------------------|
@@ -322,7 +331,7 @@ function URL and subscribe to these topics:
 
 ```bash
 pip install pytest requests phonenumbers
-pytest tests/test_intercom_article_drafts.py packages/intercom/tests/ -v
+pytest tests/ -v
 ```
 
 ### Live local testing (real Intercom webhooks)
@@ -332,7 +341,7 @@ cp .env.example .env
 # Fill in real credentials
 
 pip install requests python-dotenv phonenumbers
-python3 packages/intercom/tests/serve_local.py
+python3 tests/intercom/serve_local.py
 
 # In another terminal:
 ngrok http 8080

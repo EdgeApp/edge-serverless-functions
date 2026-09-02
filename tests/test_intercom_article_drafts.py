@@ -9,7 +9,10 @@ import requests
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FUNCTION = PROJECT_ROOT / "packages/intercom-article-drafts/upload/__main__.py"
-PACKAGE_ROOT = PROJECT_ROOT / "packages/intercom-article-drafts"
+DEPLOYABLE_ACTIONS = {
+    "intercom": ["webhook"],
+    "intercom-article-drafts": ["upload"],
+}
 spec = importlib.util.spec_from_file_location("article_draft_upload", FUNCTION)
 upload = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(upload)
@@ -150,11 +153,24 @@ def test_manifest_keeps_numeric_author_string_and_allows_update_readbacks():
     assert re.search(r"^\s+timeout:\s+45000\s*$", manifest, re.MULTILINE)
 
 
-def test_only_upload_is_a_deployable_article_draft_action():
-    immediate_directories = sorted(
-        path.name for path in PACKAGE_ROOT.iterdir() if path.is_dir()
+def test_only_intended_packages_are_deployable():
+    package_names = sorted(
+        path.name for path in (PROJECT_ROOT / "packages").iterdir() if path.is_dir()
     )
-    assert immediate_directories == ["upload"]
+    assert package_names == sorted(DEPLOYABLE_ACTIONS)
+
+
+@pytest.mark.parametrize(
+    ("package_name", "expected_actions"), DEPLOYABLE_ACTIONS.items()
+)
+def test_only_intended_action_directories_are_deployable(
+    package_name, expected_actions
+):
+    package_root = PROJECT_ROOT / "packages" / package_name
+    immediate_directories = sorted(
+        path.name for path in package_root.iterdir() if path.is_dir()
+    )
+    assert immediate_directories == sorted(expected_actions)
 
 
 def test_create_forces_draft_and_returns_identity():
