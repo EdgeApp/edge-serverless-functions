@@ -41,27 +41,51 @@ def _receipt_exists(conversation_id: str, marker: str) -> bool:
     )
 
 
+def _format_time_difference(minutes: int, reference: str) -> str:
+    """Describe a caller's wall-clock difference from a reference location."""
+    if minutes == 0:
+        return f"Same time as {reference}"
+
+    absolute_minutes = abs(minutes)
+    hours, remaining_minutes = divmod(absolute_minutes, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours} {'hour' if hours == 1 else 'hours'}")
+    if remaining_minutes:
+        parts.append(
+            f"{remaining_minutes} "
+            f"{'minute' if remaining_minutes == 1 else 'minutes'}"
+        )
+    direction = "ahead of" if minutes > 0 else "behind"
+    return f"{' '.join(parts)} {direction} {reference}"
+
+
 def _build_note_body(info: dict, phone: str, call_id: str) -> str:
     """Format the timezone inference as a rich internal note."""
     lines = [
         f"<b>🕐 {info['timezone']}</b> ({info['utc_offset'] or '?'})",
     ]
 
-    if info["local_time"]:
-        lines.append(f"Local time: {info['local_time']}")
+    if info["difference_from_san_diego_minutes"] is not None:
+        lines.append(
+            "🌴 "
+            + _format_time_difference(
+                info["difference_from_san_diego_minutes"], "San Diego"
+            )
+        )
 
-    parts = []
-    if info["location"]:
-        parts.append(info["location"])
-    if info["country"]:
-        parts.append(info["country"])
-    if info["area_code"]:
-        parts.append(f"area code {info['area_code']}")
-    if parts:
-        lines.append(" · ".join(parts))
+    if info["difference_from_rome_minutes"] is not None:
+        lines.append(
+            "🇮🇹 "
+            + _format_time_difference(info["difference_from_rome_minutes"], "Rome")
+        )
+
+    phone_region = info["location"] or info["country"]
+    if phone_region:
+        lines.append(f"🗺️ Phone region: {phone_region}")
 
     confidence_label = "High" if info["confidence"] == "high" else "Approximate"
-    lines.append(f"Confidence: {confidence_label}")
+    lines.append(f"🎯 Confidence: {confidence_label}")
     lines.append(_receipt_marker(call_id))
 
     return "<br>".join(lines)
