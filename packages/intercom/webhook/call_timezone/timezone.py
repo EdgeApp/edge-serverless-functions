@@ -1,11 +1,34 @@
 """Infer IANA timezone from an E.164 phone number using Google's libphonenumber."""
 
 from datetime import datetime, timezone as dt_timezone
+from zoneinfo import ZoneInfo
 
 import phonenumbers
 from phonenumbers import geocoder as pn_geocoder
 from phonenumbers import timezone as pn_timezone
 from phonenumbers.phonenumberutil import NumberParseException
+
+
+SAN_DIEGO_TIMEZONE = "America/Los_Angeles"
+ROME_TIMEZONE = "Europe/Rome"
+
+
+def _format_utc_offset(offset) -> str:
+    """Format a UTC offset without losing negative fractional hours."""
+    total_minutes = int(offset.total_seconds() / 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    hours, minutes = divmod(abs(total_minutes), 60)
+    suffix = f":{minutes:02d}" if minutes else ""
+    return f"UTC{sign}{hours}{suffix}"
+
+
+def _timezone_difference_minutes(
+    caller_timezone: str, reference_timezone: str, at_utc: datetime
+) -> int:
+    """Return caller wall-clock minutes ahead of a reference timezone."""
+    caller_offset = at_utc.astimezone(ZoneInfo(caller_timezone)).utcoffset()
+    reference_offset = at_utc.astimezone(ZoneInfo(reference_timezone)).utcoffset()
+    return int((caller_offset - reference_offset).total_seconds() / 60)
 
 
 def infer_timezone(phone_e164: str) -> dict:
@@ -19,6 +42,8 @@ def infer_timezone(phone_e164: str) -> dict:
         confidence - "high" (single match) or "approximate" (picked from multiple)
         utc_offset - e.g. "UTC-5"
         local_time - local time at the moment of inference
+        difference_from_san_diego_minutes - caller wall-clock delta from San Diego
+        difference_from_rome_minutes - caller wall-clock delta from Rome
     """
     try:
         parsed = phonenumbers.parse(phone_e164, None)
@@ -49,20 +74,21 @@ def infer_timezone(phone_e164: str) -> dict:
 
     now_utc = datetime.now(dt_timezone.utc)
     try:
-        from zoneinfo import ZoneInfo
         tz_obj = ZoneInfo(tz_name)
         local_now = now_utc.astimezone(tz_obj)
-        utc_offset_seconds = local_now.utcoffset().total_seconds()
-        offset_hours = int(utc_offset_seconds // 3600)
-        offset_mins = int(abs(utc_offset_seconds) % 3600 // 60)
-        if offset_mins:
-            utc_offset = f"UTC{offset_hours:+d}:{offset_mins:02d}"
-        else:
-            utc_offset = f"UTC{offset_hours:+d}"
+        utc_offset = _format_utc_offset(local_now.utcoffset())
         local_time = local_now.strftime("%-I:%M %p %Z")
+        difference_from_san_diego_minutes = _timezone_difference_minutes(
+            tz_name, SAN_DIEGO_TIMEZONE, now_utc
+        )
+        difference_from_rome_minutes = _timezone_difference_minutes(
+            tz_name, ROME_TIMEZONE, now_utc
+        )
     except Exception:
         utc_offset = None
         local_time = None
+        difference_from_san_diego_minutes = None
+        difference_from_rome_minutes = None
 
     return {
         "timezone": tz_name,
@@ -72,5 +98,7 @@ def infer_timezone(phone_e164: str) -> dict:
         "confidence": confidence,
         "utc_offset": utc_offset,
         "local_time": local_time,
+        "difference_from_san_diego_minutes": difference_from_san_diego_minutes,
+        "difference_from_rome_minutes": difference_from_rome_minutes,
         "all_zones": list(zones) if len(zones) > 1 else None,
     }

@@ -1,4 +1,5 @@
 import base64
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import importlib.util
@@ -14,6 +15,7 @@ FUNC_DIR = PROJECT_ROOT / "packages" / "intercom" / "webhook"
 sys.path.insert(0, str(FUNC_DIR))
 
 import intercom_client as tz_intercom_client
+from call_timezone import handler as call_timezone_handler
 from call_timezone import timezone as tz_module
 
 spec = importlib.util.spec_from_file_location(
@@ -164,10 +166,74 @@ class TestTimezoneInference:
         assert "local_time" in result
         assert "area_code" in result
         assert "location" in result
+        assert "difference_from_san_diego_minutes" in result
+        assert "difference_from_rome_minutes" in result
 
     def test_invalid_number_returns_none(self):
         result = tz_module.infer_timezone("+0000000")
         assert result is None
+
+    def test_reference_differences_follow_each_regions_daylight_saving(self):
+        summer = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        between_us_and_eu_transitions = datetime(2026, 3, 15, tzinfo=timezone.utc)
+
+        assert tz_module._timezone_difference_minutes(
+            "America/New_York", "America/Los_Angeles", summer
+        ) == 180
+        assert tz_module._timezone_difference_minutes(
+            "America/New_York", "Europe/Rome", summer
+        ) == -360
+        assert tz_module._timezone_difference_minutes(
+            "America/New_York", "Europe/Rome", between_us_and_eu_transitions
+        ) == -300
+        assert tz_module._timezone_difference_minutes(
+            "Asia/Kathmandu", "America/Los_Angeles", summer
+        ) == 765
+
+    def test_negative_fractional_utc_offset_is_formatted_correctly(self):
+        assert tz_module._format_utc_offset(timedelta(hours=-3, minutes=-30)) == "UTC-3:30"
+
+
+class TestNoteFormatting:
+    def test_callback_reference_layout_keeps_exact_deduplication_marker(self):
+        info = {
+            "timezone": "America/New_York",
+            "utc_offset": "UTC-4",
+            "difference_from_san_diego_minutes": 180,
+            "difference_from_rome_minutes": -360,
+            "location": "Maine",
+            "country": "US",
+            "confidence": "high",
+        }
+
+        assert call_timezone_handler._build_note_body(
+            info, "+12075551234", "call_123"
+        ) == "<br>".join(
+            [
+                "<b>🕐 America/New_York</b> (UTC-4)",
+                "🌴 3 hours ahead of San Diego",
+                "🇮🇹 6 hours behind Rome",
+                "🗺️ Phone region: Maine",
+                "🎯 Confidence: High",
+                "[edge-call-location call_id=call_123]",
+            ]
+        )
+
+    @pytest.mark.parametrize(
+        ("minutes", "reference", "expected"),
+        [
+            (0, "San Diego", "Same time as San Diego"),
+            (60, "San Diego", "1 hour ahead of San Diego"),
+            (-1, "Rome", "1 minute behind Rome"),
+            (345, "Rome", "5 hours 45 minutes ahead of Rome"),
+        ],
+    )
+    def test_formats_whole_and_fractional_differences(
+        self, minutes, reference, expected
+    ):
+        assert call_timezone_handler._format_time_difference(
+            minutes, reference
+        ) == expected
 
 
 # ── Signature verification ───────────────────────────────────────────
@@ -277,7 +343,11 @@ class TestHandlerFlow:
         assert note_call[1]["json"]["message_type"] == "note"
         note_body = note_call[1]["json"]["body"]
         assert "America/" in note_body
-        assert "212" in note_body
+        assert "ahead of San Diego" in note_body
+        assert "behind Rome" in note_body
+        assert "Phone region:" in note_body
+        assert "Local time:" not in note_body
+        assert "area code" not in note_body
         assert "[edge-call-location call_id=call_123]" in note_body
 
         assert mock_put.call_count == 1
