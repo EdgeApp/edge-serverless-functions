@@ -12,6 +12,7 @@ FUNCTION = PROJECT_ROOT / "packages/intercom-article-drafts/upload/__main__.py"
 DEPLOYABLE_ACTIONS = {
     "intercom": ["webhook"],
     "intercom-article-drafts": ["upload"],
+    "testrail": ["bridge"],
 }
 spec = importlib.util.spec_from_file_location("article_draft_upload", FUNCTION)
 upload = importlib.util.module_from_spec(spec)

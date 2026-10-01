@@ -3,6 +3,59 @@
 DigitalOcean serverless functions for Edge. All Intercom webhooks are
 handled by a single `intercom/webhook` function that routes by topic.
 
+## TestRail API bridge
+
+`testrail/bridge` keeps the TestRail API key in DigitalOcean while exposing a
+small authenticated JSON relay. It accepts ordinary TestRail API method names,
+uses `GET` for `get_*` methods and `POST` for every other method, and returns the
+upstream status and JSON body in a structured receipt.
+
+The bridge blocks every `delete_*` method and rejects `is_deleted` anywhere in
+a request body. The upstream origin is fixed by `TESTRAIL_BASE_URL`; callers
+cannot provide a URL or redirect the credential elsewhere. File uploads are not
+part of this initial JSON-only bridge.
+
+Read a case:
+
+```json
+{
+  "endpoint": "get_case/42"
+}
+```
+
+Create a case:
+
+```json
+{
+  "endpoint": "add_case/7",
+  "operation_id": "testrail-create-20261001-0001",
+  "body": {
+    "title": "Create a wallet",
+    "priority_id": 2
+  }
+}
+```
+
+Optional query parameters belong in `params`; the bridge appends them using
+TestRail's `index.php?/api/v2/<method>&key=value` URL format. Send every call as
+`POST` to the bridge with `Authorization: Bearer $TESTRAIL_BRIDGE_SECRET`.
+
+Successful receipts include `upstream_status`, `upstream_body`, the inferred
+upstream method, and the caller's `operation_id`. TestRail 4xx responses are
+returned as deterministic rejections. A timeout or connection failure during a
+mutation is reported as `outcome: unknown` and `retry_safe: false`; do not
+blindly retry it because TestRail may have committed the write before the
+response was lost.
+
+Deploy only this action:
+
+```bash
+doctl serverless deploy . \
+  --remote-build \
+  --env .env \
+  --include testrail/bridge
+```
+
 ## Intercom article draft bridge
 
 `intercom-article-drafts/upload` is a small authenticated bridge for creating
@@ -225,6 +278,8 @@ edge-serverless-functions/
 ├── .env.example                           # Template for local dev secrets
 ├── README.md
 ├── packages/
+│   ├── testrail/
+│   │   └── bridge/                        # Authenticated TestRail JSON relay
 │   ├── intercom-article-drafts/
 │   │   └── upload/                        # Authenticated draft function
 │   └── intercom/
@@ -298,9 +353,10 @@ doctl serverless connect
 doctl serverless deploy . \
   --remote-build \
   --env .env \
-  --include intercom/webhook,intercom-article-drafts/upload
+  --include intercom/webhook,intercom-article-drafts/upload,testrail/bridge
 doctl serverless functions get intercom/webhook --url
 doctl serverless functions get intercom-article-drafts/upload --url
+doctl serverless functions get testrail/bridge --url
 ```
 
 ### Required DigitalOcean Environment Variables
@@ -316,6 +372,10 @@ rely on dashboard edits; a later CLI deploy can replace them.
 | `LEAD_TO_USER_CONVERSION_ENABLED` | Optional. Set to `true` to enable server-side lead→user merge. **Off by default** because the merge breaks live Messenger sessions (see Lead-to-User section). |
 | `INTERCOM_DRAFT_BRIDGE_SECRET`     | Random bearer secret required by the draft bridge. |
 | `INTERCOM_ARTICLE_AUTHOR_ID`       | Intercom teammate/admin ID used as the article author. |
+| `TESTRAIL_BASE_URL`                | TestRail HTTPS origin, such as `https://edge.testrail.io`. |
+| `TESTRAIL_USER_EMAIL`              | Email for the TestRail user that owns the API key. |
+| `TESTRAIL_API_KEY`                 | Dedicated named TestRail API key stored only in DigitalOcean. |
+| `TESTRAIL_BRIDGE_SECRET`           | Random bearer secret required by the TestRail bridge. |
 
 ### Intercom Webhook Setup
 

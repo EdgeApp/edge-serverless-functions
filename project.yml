@@ -1,4 +1,17 @@
 packages:
+  - name: testrail
+    environment:
+      TESTRAIL_BASE_URL: ${TESTRAIL_BASE_URL}
+      TESTRAIL_USER_EMAIL: ${TESTRAIL_USER_EMAIL}
+      TESTRAIL_API_KEY: ${TESTRAIL_API_KEY}
+      TESTRAIL_BRIDGE_SECRET: ${TESTRAIL_BRIDGE_SECRET}
+    functions:
+      - name: bridge
+        runtime: python:3.12
+        web: raw
+        limits:
+          timeout: 45000
+          memory: 256
   - name: intercom-article-drafts
     environment:
       INTERCOM_ACCESS_TOKEN: ${INTERCOM_ACCESS_TOKEN}
