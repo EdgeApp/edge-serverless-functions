@@ -12,8 +12,7 @@ upstream status and JSON body in a structured receipt.
 
 The bridge blocks every `delete_*` method and rejects `is_deleted` anywhere in
 a request body. The upstream origin is fixed by `TESTRAIL_BASE_URL`; callers
-cannot provide a URL or redirect the credential elsewhere. File uploads are not
-part of this initial JSON-only bridge.
+cannot provide a URL or redirect the credential elsewhere.
 
 Read a case:
 
@@ -55,6 +54,54 @@ doctl serverless deploy . \
   --env .env \
   --include testrail/bridge
 ```
+
+### TestRail attachments
+
+DigitalOcean Functions limits both requests and responses to 1 MB, while
+TestRail accepts attachments up to 256 MB. `services/testrail-files` is a small
+streaming App Platform service for the binary transfer path. It uses the same
+four environment variables and the same fixed-origin/deletion-blocking policy
+as the JSON function.
+
+Download an attachment without exposing the TestRail credential:
+
+```bash
+curl --fail --location \
+  -H "Authorization: Bearer $TESTRAIL_BRIDGE_SECRET" \
+  --output screenshot.png \
+  "$TESTRAIL_FILES_URL/attachments/$ATTACHMENT_ID"
+```
+
+Upload to any documented TestRail attachment target:
+
+```bash
+curl --fail \
+  -H "Authorization: Bearer $TESTRAIL_BRIDGE_SECRET" \
+  -F "attachment=@screenshot.png" \
+  "$TESTRAIL_FILES_URL/attachments/add_attachment_to_case/$CASE_ID"
+```
+
+The upload path also supports `add_attachment_to_plan`,
+`add_attachment_to_plan_entry`, `add_attachment_to_result`, and
+`add_attachment_to_run`. Uploads spool to App Platform's temporary disk and
+then stream to TestRail; downloads stream directly back to the caller. Neither
+path packs file bytes into a Function response. The service adds no file-size
+policy; TestRail's own 256 MB maximum and App Platform's 600-second upload
+timeout are the effective limits.
+
+To deploy, copy `services/testrail-files/app-spec.example.yaml` to an ignored
+local file, replace the four `REPLACE_ME` values, and create the App Platform
+service:
+
+```bash
+doctl apps create \
+  --spec services/testrail-files/app-spec.local.yaml \
+  --wait
+```
+
+The example spec deploys from `main` and enables deploy-on-push. Keep the local
+spec out of git because its replacement values are plaintext before submission;
+DigitalOcean encrypts fields marked `SECRET` after accepting the spec.
 
 ## Intercom article draft bridge
 
@@ -392,7 +439,7 @@ function URL and subscribe to these topics:
 ### Unit tests (no API keys needed)
 
 ```bash
-pip install pytest requests phonenumbers
+pip install pytest phonenumbers -r services/testrail-files/requirements.txt
 pytest tests/ -v
 ```
 

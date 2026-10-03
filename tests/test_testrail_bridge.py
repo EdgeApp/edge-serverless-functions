@@ -176,6 +176,16 @@ def test_missing_or_wrong_bridge_secret_is_rejected():
     request.assert_not_called()
 
 
+def test_non_ascii_bridge_secret_is_rejected_without_server_error():
+    with patch.object(bridge.requests, "request") as request:
+        result = bridge.main(
+            event({"endpoint": "get_projects"}, token="café-not-the-secret"), None
+        )
+
+    assert result["statusCode"] == 401
+    request.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "endpoint",
     [

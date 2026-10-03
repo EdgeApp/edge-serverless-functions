@@ -51,7 +51,7 @@ def _authenticate(event):
         raise RequestError(500, "TestRail bridge configuration error")
     supplied = _event_headers(event).get("authorization", "")
     if not supplied.startswith("Bearer ") or not hmac.compare_digest(
-        supplied[7:], expected
+        supplied[7:].encode("utf-8"), expected.encode("utf-8")
     ):
         raise RequestError(401, "Unauthorized")
 
