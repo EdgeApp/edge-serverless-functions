@@ -46,20 +46,30 @@ mutation is reported as `outcome: unknown` and `retry_safe: false`; do not
 blindly retry it because TestRail may have committed the write before the
 response was lost.
 
-### Deploy or update both bridges
+### Production deployment
 
-The operator path is one idempotent command from the repository root:
+The canonical production path is one idempotent, repository-wide command:
 
 ```bash
-./scripts/deploy-testrail.sh
+./scripts/deploy.sh
 ```
 
-The script validates the four required `.env` entries, deploys only the JSON
-action, creates or updates the attachment service, performs read-only health and
-`get_projects` checks, and prints both URLs. It does not run the repository test
-suite; tests and Python runtime selection are build/CI responsibilities, not a
-production deployment prerequisite. To validate credentials and renderability
-without contacting DigitalOcean, run `./scripts/deploy-testrail.sh --check`.
+It validates every templated `.env` value in `project.yml`, verifies the clean
+checkout is the current `origin/main`, pins the expected `edge-tools` namespace,
+and deploys all three Functions explicitly:
+
+- `intercom/webhook`
+- `intercom-article-drafts/upload`
+- `testrail/bridge`
+
+It also creates or updates the TestRail attachment App Platform service, runs
+non-mutating verification against all four deployed endpoints, and prints the
+deployed Git SHA plus every URL. It does not run the repository test suite;
+tests and Python runtime selection are build/CI responsibilities, not a
+production deployment prerequisite.
+
+To validate all required secrets and render the private App Platform spec
+without contacting DigitalOcean, run `./scripts/deploy.sh --check`.
 
 ### TestRail attachments
 
@@ -236,11 +246,11 @@ The public Articles API does not expose Knowledge Hub's private
 that ID after the mutation through an authenticated teammate-session search,
 then inserts it into the fixed review URL template.
 
-### Draft-broker deployment scope
+### Draft-broker development deployment
 
-Deploy the broker by its exact function path. For a broker-only release, do not
-include the webhook; DigitalOcean discovers immediate package subdirectories as
-actions.
+The production command deploys the complete repository. During isolated
+development, the broker can still be deployed by its exact function path;
+DigitalOcean discovers immediate package subdirectories as actions.
 
 ```bash
 doctl serverless deploy . \
@@ -380,28 +390,24 @@ if topic in YOUR_TOPICS:
 5. Add any new environment variables in the DO Functions dashboard and
    update `.env.example`.
 
-6. Deploy only the webhook action:
-   `doctl serverless deploy . --remote-build --env .env --include intercom/webhook`
+6. Deploy the complete production set with `./scripts/deploy.sh`.
 
 ## Deployment
 
-Deploy via the `doctl` CLI. Always include the exact intended action paths;
-DigitalOcean auto-discovers every immediate directory below `packages/<package>`
-as a function candidate, even when it is absent from `project.yml`.
-Use one exact path for a single-function release or a comma-separated list for a
-combined release. Never run a production deployment without `--include`.
+After an approved change is merged, update the clean local `main` checkout and
+run the repository-owned deployment command:
 
 ```bash
-doctl auth init
-doctl serverless connect
-doctl serverless deploy . \
-  --remote-build \
-  --env .env \
-  --include intercom/webhook,intercom-article-drafts/upload,testrail/bridge
-doctl serverless functions get intercom/webhook --url
-doctl serverless functions get intercom-article-drafts/upload --url
-doctl serverless functions get testrail/bridge --url
+git switch main
+git pull --ff-only origin main
+./scripts/deploy.sh
 ```
+
+The script uses `doctl`, fails closed unless the checkout exactly matches
+`origin/main`, deploys the complete explicit Function allowlist, manages the
+attachment app, verifies every endpoint, and prints a final receipt. Do not
+replace it with an unscoped `doctl serverless deploy` command: DigitalOcean can
+discover immediate package subdirectories that are not intended actions.
 
 ### Required DigitalOcean Environment Variables
 
