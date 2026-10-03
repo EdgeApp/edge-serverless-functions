@@ -46,14 +46,20 @@ mutation is reported as `outcome: unknown` and `retry_safe: false`; do not
 blindly retry it because TestRail may have committed the write before the
 response was lost.
 
-Deploy only this action:
+### Deploy or update both bridges
+
+The operator path is one idempotent command from the repository root:
 
 ```bash
-doctl serverless deploy . \
-  --remote-build \
-  --env .env \
-  --include testrail/bridge
+./scripts/deploy-testrail.sh
 ```
+
+The script validates the four required `.env` entries, deploys only the JSON
+action, creates or updates the attachment service, performs read-only health and
+`get_projects` checks, and prints both URLs. It does not run the repository test
+suite; tests and Python runtime selection are build/CI responsibilities, not a
+production deployment prerequisite. To validate credentials and renderability
+without contacting DigitalOcean, run `./scripts/deploy-testrail.sh --check`.
 
 ### TestRail attachments
 
@@ -89,19 +95,10 @@ path packs file bytes into a Function response. The service adds no file-size
 policy; TestRail's own 256 MB maximum and App Platform's 600-second upload
 timeout are the effective limits.
 
-To deploy, copy `services/testrail-files/app-spec.example.yaml` to an ignored
-local file, replace the four `REPLACE_ME` values, and create the App Platform
-service:
-
-```bash
-doctl apps create \
-  --spec services/testrail-files/app-spec.local.yaml \
-  --wait
-```
-
-The example spec deploys from `main` and enables deploy-on-push. Keep the local
-spec out of git because its replacement values are plaintext before submission;
-DigitalOcean encrypts fields marked `SECRET` after accepting the spec.
+The deployment script renders the App Platform spec into a mode-restricted
+temporary file and removes it on exit. The example spec deploys from `main` and
+enables deploy-on-push; DigitalOcean encrypts fields marked `SECRET` after
+accepting the spec.
 
 ## Intercom article draft bridge
 
