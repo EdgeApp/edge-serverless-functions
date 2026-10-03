@@ -132,11 +132,15 @@ def article(
     scheduled_publish_at=None,
     scheduled_unpublish_at=None,
     parent_ids=None,
+    parent_id=UNSET,
+    parent_type="collection",
 ):
     if draft_updated_at is UNSET:
         draft_updated_at = 1700000100 if pending else None
     if parent_ids is None:
         parent_ids = [DESTINATION["id"]]
+    if parent_id is UNSET:
+        parent_id = parent_ids[0] if parent_ids else None
     return {
         "id": "9001",
         "type": "article",
@@ -152,6 +156,8 @@ def article(
         "scheduled_publish_at": scheduled_publish_at,
         "scheduled_unpublish_at": scheduled_unpublish_at,
         "parent_ids": parent_ids,
+        "parent_id": parent_id,
+        "parent_type": parent_type,
     }
 
 
@@ -286,6 +292,27 @@ def test_create_reconciles_if_intercom_returns_the_wrong_collection():
     assert_reconciliation(result, "9001")
 
 
+def test_create_accepts_stable_parent_echo_when_parent_ids_is_empty():
+    created = article(parent_ids=[], parent_id=DESTINATION["id"])
+    with patch.object(upload.requests, "request", return_value=response(created)):
+        result = upload.main(event(create_payload()), None)
+
+    assert result["statusCode"] == 200
+    assert body(result)["destination"]["id"] == DESTINATION["id"]
+
+
+def test_create_reconciles_if_direct_parent_disagrees_with_parent_ids():
+    created = article(
+        parent_ids=[DESTINATION["id"]],
+        parent_id="778",
+        parent_type="collection",
+    )
+    with patch.object(upload.requests, "request", return_value=response(created)):
+        result = upload.main(event(create_payload()), None)
+
+    assert_reconciliation(result, "9001")
+
+
 def test_create_rejects_a_stale_destination_selection_before_mutation():
     payload = create_payload(destination_fingerprint="0" * 64)
     with patch.object(upload.requests, "request") as request:
@@ -336,7 +363,8 @@ def test_destination_catalog_uses_the_live_default_help_center_and_new_collectio
                 "help_center_id": 5014220,
             },
         ],
-        "pages": {"next": {"starting_after": "page-2"}},
+        "total_count": 4,
+        "pages": {"page": 1, "per_page": 3, "total_pages": 2},
     }
     second_page = {
         "data": [
@@ -347,7 +375,8 @@ def test_destination_catalog_uses_the_live_default_help_center_and_new_collectio
                 "help_center_id": 4986928,
             }
         ],
-        "pages": {"next": None},
+        "total_count": 4,
+        "pages": {"page": 2, "per_page": 3, "total_pages": 2},
     }
     with patch.object(
         upload.requests,
@@ -365,8 +394,41 @@ def test_destination_catalog_uses_the_live_default_help_center_and_new_collectio
     assert re.fullmatch(r"[0-9a-f]{64}", selected["fingerprint"])
     assert re.fullmatch(r"[0-9a-f]{64}", catalog_hash)
     assert request.call_args_list[2].args[1].endswith(
-        "/help_center/collections?per_page=150&starting_after=page-2"
+        "/help_center/collections?per_page=150&page=2"
     )
+
+
+def test_destination_catalog_rejects_silent_pagination_truncation(monkeypatch):
+    monkeypatch.setattr(upload, "_destination_catalog", REAL_DESTINATION_CATALOG)
+    help_centers = {
+        "data": [
+            {
+                "id": "4986928",
+                "display_name": "Edge Help Center",
+                "default": True,
+                "website_turned_on": True,
+            }
+        ]
+    }
+    truncated = {
+        "data": [
+            {
+                "id": "900",
+                "name": "Only visible page",
+                "parent_id": None,
+                "help_center_id": 4986928,
+            }
+        ],
+        "total_count": 2,
+        "pages": {"page": 1, "per_page": 1, "total_pages": 1},
+    }
+    with patch.object(
+        upload.requests,
+        "request",
+        side_effect=[response(help_centers), response(truncated)],
+    ):
+        with pytest.raises(upload.RequestError, match="pagination ended early"):
+            REAL_DESTINATION_CATALOG(upload.time.monotonic() + 30)
 
 
 def test_list_destinations_returns_a_live_catalog_without_mutation():
@@ -1125,6 +1187,27 @@ def test_create_timeout_is_non_retryable_and_requires_reconciliation():
     assert_reconciliation(result)
 
 
+def test_catalog_timeout_is_retry_safe_and_operation_bound(monkeypatch):
+    def timeout(_deadline):
+        raise requests.Timeout()
+
+    monkeypatch.setattr(upload, "_destination_catalog", timeout)
+    with patch.object(upload.requests, "request") as request:
+        result = upload.main(event(create_payload()), None)
+
+    assert result["statusCode"] == 502
+    assert body(result) == {
+        "ok": False,
+        "error": "Intercom request failed",
+        "outcome": "rejected",
+        "operation_id": "kb-test-create-0001",
+        "mutation_attempted": False,
+        "reconciliation_required": False,
+        "retry_safe": True,
+    }
+    request.assert_not_called()
+
+
 def test_post_update_readback_timeout_requires_reconciliation():
     old = article()
     updated = submitted_article()
@@ -1226,6 +1309,7 @@ def test_unknown_existing_article_state_is_rejected_without_mutation():
         {},
         {"operation": "create", "title": "", "body_markdown": "body"},
         create_payload(description=""),
+        {key: value for key, value in create_payload().items() if key != "destination_id"},
         {key: value for key, value in create_payload().items() if key != "description"},
         create_payload(operation_id="short"),
     ],

@@ -19,6 +19,7 @@ REQUEST_BUDGET_SECONDS = 30.0
 CONNECT_TIMEOUT_SECONDS = 2.0
 READ_TIMEOUT_SECONDS = 5.0
 MIN_REQUEST_WINDOW_SECONDS = 0.75
+MIN_CREATE_MUTATION_SECONDS = 5.0
 SCHEDULE_FIELDS = ("scheduled_publish_at", "scheduled_unpublish_at")
 DETERMINISTIC_MUTATION_STATUSES = {400, 401, 403, 404, 405, 409, 422}
 ALLOWED_PAYLOAD_FIELDS = {
@@ -275,28 +276,58 @@ def _active_help_center(deadline):
 
 
 def _collection_pages(deadline):
-    path = "/help_center/collections?per_page=150"
+    path = "/help_center/collections?per_page=150&page=1"
     collections = []
+    expected_total = None
     for _ in range(MAX_COLLECTION_PAGES):
         response = _request("GET", path, deadline)
-        collections.extend(_list_data(response, "collection"))
-        pages = response.get("pages")
-        if pages is None:
+        page_data = _list_data(response, "collection")
+        total_count = response.get("total_count")
+        if (
+            isinstance(total_count, bool)
+            or not isinstance(total_count, int)
+            or total_count < 0
+        ):
+            raise RequestError(502, "Intercom returned invalid collection count")
+        if expected_total is None:
+            expected_total = total_count
+        elif total_count != expected_total:
+            raise RequestError(409, "Intercom collection inventory changed during pagination")
+        collections.extend(page_data)
+        if len(collections) > expected_total:
+            raise RequestError(502, "Intercom collection pagination exceeded its count")
+        if len(collections) == expected_total:
             return collections
+
+        pages = response.get("pages")
         if not isinstance(pages, dict):
             raise RequestError(502, "Intercom returned invalid collection pagination")
         next_page = pages.get("next")
-        if next_page is None:
-            return collections
-        if not isinstance(next_page, dict):
+        if isinstance(next_page, dict):
+            starting_after = next_page.get("starting_after")
+            if not isinstance(starting_after, str) or not starting_after:
+                raise RequestError(502, "Intercom returned invalid collection pagination")
+            path = "/help_center/collections?" + urllib.parse.urlencode(
+                {"per_page": 150, "starting_after": starting_after}
+            )
+            continue
+        if next_page is not None:
             raise RequestError(502, "Intercom returned invalid collection pagination")
-        starting_after = next_page.get("starting_after")
-        if starting_after is None:
-            return collections
-        if not isinstance(starting_after, str) or not starting_after:
-            raise RequestError(502, "Intercom returned invalid collection pagination")
+
+        page = pages.get("page")
+        total_pages = pages.get("total_pages")
+        if (
+            isinstance(page, bool)
+            or not isinstance(page, int)
+            or page < 1
+            or isinstance(total_pages, bool)
+            or not isinstance(total_pages, int)
+            or total_pages < page
+            or page >= total_pages
+        ):
+            raise RequestError(502, "Intercom collection pagination ended early")
         path = "/help_center/collections?" + urllib.parse.urlencode(
-            {"per_page": 150, "starting_after": starting_after}
+            {"per_page": 150, "page": page + 1}
         )
     raise RequestError(502, "Intercom collection inventory exceeded the page limit")
 
@@ -521,9 +552,19 @@ def _verify_draft(article, fields, expected_id=None, expected_parent_id=None):
     _verify_content(article, fields)
     if expected_parent_id is not None:
         parent_ids = article.get("parent_ids")
-        if not isinstance(parent_ids, list) or [str(value) for value in parent_ids] != [
-            expected_parent_id
-        ]:
+        if parent_ids is not None and not isinstance(parent_ids, list):
+            raise RequestError(502, "Intercom returned invalid collection membership")
+        direct_parent_present = "parent_id" in article or "parent_type" in article
+        direct_parent_matches = (
+            _positive_ascii_id(article.get("parent_id")) == expected_parent_id
+            and article.get("parent_type") == "collection"
+        )
+        listed_parent_matches = isinstance(parent_ids, list) and expected_parent_id in {
+            str(value) for value in parent_ids
+        }
+        if direct_parent_present and not direct_parent_matches:
+            raise RequestError(502, "Intercom did not preserve the selected collection")
+        if not direct_parent_matches and not listed_parent_matches:
             raise RequestError(502, "Intercom did not preserve the selected collection")
     return article_id
 
@@ -628,6 +669,8 @@ def _create(payload, deadline):
             400, "replace_staged_draft_fingerprint is not allowed for create"
         )
     destination = _selected_destination(payload, deadline)
+    if deadline - time.monotonic() < MIN_CREATE_MUTATION_SECONDS:
+        raise RequestError(503, "Insufficient request budget before draft mutation")
     fields = _article_fields(payload)
     fields["parent_id"] = int(destination["id"])
     fields["parent_type"] = "collection"
@@ -881,6 +924,20 @@ def main(event, context):
         return _response(error.status_code, body)
     except requests.RequestException as error:
         status = error.response.status_code if error.response is not None else 502
-        return _response(status, {"ok": False, "error": "Intercom request failed"})
+        body = {"ok": False, "error": "Intercom request failed"}
+        operation_id = payload.get("operation_id")
+        if isinstance(operation_id, str) and re.fullmatch(
+            r"[A-Za-z0-9._:-]{8,128}", operation_id
+        ):
+            body.update(
+                {
+                    "outcome": "rejected",
+                    "operation_id": operation_id,
+                    "mutation_attempted": False,
+                    "reconciliation_required": False,
+                    "retry_safe": True,
+                }
+            )
+        return _response(status, body)
     except (KeyError, TypeError, ValueError, RuntimeError):
         return _response(500, {"ok": False, "error": "Draft bridge configuration error"})
