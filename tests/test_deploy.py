@@ -192,6 +192,9 @@ esac
     assert "test-intercom-token" not in result.stdout + result.stderr
 
     calls = log_path.read_text()
+    assert calls.index(
+        "apps list --format ID,Spec.Name --no-header"
+    ) < calls.index("serverless deploy")
     assert (
         "serverless deploy . --remote-build --env "
         + str(env_file)
@@ -204,3 +207,66 @@ esac
     else:
         assert "apps create" in calls
         assert "apps update" not in calls
+
+
+def test_app_platform_authorization_failure_precedes_any_deployment(tmp_path):
+    env_file = tmp_path / ".env"
+    _write_env(env_file)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log_path = tmp_path / "doctl.log"
+
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        """#!/bin/sh
+set -eu
+case "$*" in
+  "branch --show-current") printf '%s\n' main ;;
+  "status --porcelain") exit 0 ;;
+  "fetch origin") exit 0 ;;
+  "rev-parse HEAD"|"rev-parse origin/main") printf '%s\n' abc123 ;;
+  *) printf 'Unexpected git call: %s\n' "$*" >&2; exit 1 ;;
+esac
+"""
+    )
+    fake_git.chmod(0o755)
+
+    fake_doctl = fake_bin / "doctl"
+    fake_doctl.write_text(
+        """#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$FAKE_DOCTL_LOG"
+case "$*" in
+  "serverless status")
+    printf '%s\n' 'namespace fn-c9829d1a-06e2-4af5-9196-b23c58499edc label=edge-tools https://faas-nyc1-2ef2e6cc.doserverless.co'
+    ;;
+  "apps list --format ID,Spec.Name --no-header") exit 1 ;;
+  *) printf 'Unexpected doctl call: %s\n' "$*" >&2; exit 1 ;;
+esac
+"""
+    )
+    fake_doctl.chmod(0o755)
+
+    run_env = os.environ.copy()
+    run_env.update(
+        {
+            "PATH": str(fake_bin) + os.pathsep + run_env["PATH"],
+            "FAKE_DOCTL_LOG": str(log_path),
+        }
+    )
+
+    result = subprocess.run(
+        [str(DEPLOY_SCRIPT), "--env-file", str(env_file)],
+        cwd=PROJECT_ROOT,
+        env=run_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "cannot list App Platform apps" in result.stderr
+    calls = log_path.read_text()
+    assert "apps list --format ID,Spec.Name --no-header" in calls
+    assert "serverless deploy" not in calls

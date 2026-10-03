@@ -181,6 +181,25 @@ printf '%s\n' "$namespace_status" | grep -Fq "$namespace_host" || {
   exit 1
 }
 
+if ! apps_inventory="$(
+  doctl apps list --format ID,Spec.Name --no-header
+)"; then
+  printf 'Refusing deployment: the current doctl credential cannot list App Platform apps.\n' >&2
+  printf 'Use a DigitalOcean API token with app:read, app:create, and app:update access.\n' >&2
+  exit 1
+fi
+
+app_matches="$(
+  printf '%s\n' "$apps_inventory" |
+    awk '$2 == "edge-testrail-files" {print $1}'
+)"
+app_count="$(printf '%s\n' "$app_matches" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+if [[ "$app_count" -gt 1 ]]; then
+  printf 'Multiple App Platform apps named edge-testrail-files exist; refusing to guess.\n' >&2
+  exit 1
+fi
+
 printf 'Deploying repository revision %s to %s.\n' "$deployed_sha" "$namespace_label"
 doctl serverless deploy . \
   --remote-build \
@@ -204,16 +223,7 @@ for resolved_url in "$webhook_url" "$drafts_url" "$testrail_url"; do
   }
 done
 
-app_matches="$(
-  doctl apps list --format ID,Spec.Name --no-header |
-    awk '$2 == "edge-testrail-files" {print $1}'
-)"
-app_count="$(printf '%s\n' "$app_matches" | sed '/^$/d' | wc -l | tr -d ' ')"
-
-if [[ "$app_count" -gt 1 ]]; then
-  printf 'Multiple App Platform apps named edge-testrail-files exist; refusing to guess.\n' >&2
-  exit 1
-elif [[ "$app_count" -eq 1 ]]; then
+if [[ "$app_count" -eq 1 ]]; then
   app_id="$app_matches"
   doctl apps update "$app_id" \
     --spec "$temp_spec" \

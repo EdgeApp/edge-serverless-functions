@@ -68,6 +68,12 @@ deployed Git SHA plus every URL. It does not run the repository test suite;
 tests and Python runtime selection are build/CI responsibilities, not a
 production deployment prerequisite.
 
+The active `doctl` API token must include `app:read`, `app:create`, and
+`app:update`; DigitalOcean automatically adds the required read dependencies
+when those custom scopes are selected. The script proves App Platform access
+before deploying any Function so an authorization failure cannot leave a new
+release partially applied.
+
 To validate all required secrets and render the private App Platform spec
 without contacting DigitalOcean, run `./scripts/deploy.sh --check`.
 
@@ -408,6 +414,10 @@ The script uses `doctl`, fails closed unless the checkout exactly matches
 attachment app, verifies every endpoint, and prints a final receipt. Do not
 replace it with an unscoped `doctl serverless deploy` command: DigitalOcean can
 discover immediate package subdirectories that are not intended actions.
+
+The `doctl` API token must include `app:read`, `app:create`, and `app:update`
+for the attachment service. App Platform authorization is checked before any
+Function is deployed.
 
 ### Required DigitalOcean Environment Variables
 
