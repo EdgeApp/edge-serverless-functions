@@ -9,6 +9,7 @@ import json
 import os
 import re
 import time
+import urllib.parse
 
 import requests
 
@@ -24,11 +25,21 @@ ALLOWED_PAYLOAD_FIELDS = {
     "article_id",
     "body_markdown",
     "description",
+    "destination_fingerprint",
+    "destination_id",
+    "destination_path",
     "operation",
     "operation_id",
     "replace_staged_draft_fingerprint",
     "title",
 }
+DESTINATION_FIELDS = (
+    "destination_id",
+    "destination_path",
+    "destination_fingerprint",
+)
+SAFE_DESTINATION_FINGERPRINT = re.compile(r"[0-9a-f]{64}")
+MAX_COLLECTION_PAGES = 10
 
 
 class RequestError(Exception):
@@ -232,6 +243,193 @@ def _replacement_fingerprint(payload):
     return value
 
 
+def _list_data(response, label):
+    data = response.get("data")
+    if not isinstance(data, list):
+        raise RequestError(502, f"Intercom returned an invalid {label} list")
+    return data
+
+
+def _active_help_center(deadline):
+    response = _request("GET", "/help_center/help_centers", deadline)
+    active = [
+        item
+        for item in _list_data(response, "Help Center")
+        if item.get("default") is True and item.get("website_turned_on") is True
+    ]
+    if len(active) != 1:
+        raise RequestError(
+            409,
+            "Intercom must have exactly one default active Help Center",
+        )
+    help_center = active[0]
+    help_center_id = _positive_ascii_id(help_center.get("id"))
+    display_name = help_center.get("display_name")
+    if help_center_id is None or not isinstance(display_name, str) or not display_name.strip():
+        raise RequestError(502, "Intercom returned incomplete Help Center identity")
+    return {
+        "id": help_center_id,
+        "display_name": display_name.strip(),
+        "url": help_center.get("url"),
+    }
+
+
+def _collection_pages(deadline):
+    path = "/help_center/collections?per_page=150"
+    collections = []
+    for _ in range(MAX_COLLECTION_PAGES):
+        response = _request("GET", path, deadline)
+        collections.extend(_list_data(response, "collection"))
+        pages = response.get("pages")
+        if pages is None:
+            return collections
+        if not isinstance(pages, dict):
+            raise RequestError(502, "Intercom returned invalid collection pagination")
+        next_page = pages.get("next")
+        if next_page is None:
+            return collections
+        if not isinstance(next_page, dict):
+            raise RequestError(502, "Intercom returned invalid collection pagination")
+        starting_after = next_page.get("starting_after")
+        if starting_after is None:
+            return collections
+        if not isinstance(starting_after, str) or not starting_after:
+            raise RequestError(502, "Intercom returned invalid collection pagination")
+        path = "/help_center/collections?" + urllib.parse.urlencode(
+            {"per_page": 150, "starting_after": starting_after}
+        )
+    raise RequestError(502, "Intercom collection inventory exceeded the page limit")
+
+
+def _destination_fingerprint(destination):
+    encoded = json.dumps(
+        {
+            "help_center_id": destination["help_center_id"],
+            "id": destination["id"],
+            "name": destination["name"],
+            "parent_id": destination["parent_id"],
+            "path": destination["path"],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _destination_catalog(deadline):
+    help_center = _active_help_center(deadline)
+    raw = [
+        item
+        for item in _collection_pages(deadline)
+        if str(item.get("help_center_id")) == help_center["id"]
+    ]
+    by_id = {}
+    for item in raw:
+        collection_id = _positive_ascii_id(item.get("id"))
+        parent_id = item.get("parent_id")
+        if parent_id is not None:
+            parent_id = _positive_ascii_id(parent_id)
+        name = item.get("name")
+        if (
+            collection_id is None
+            or (item.get("parent_id") is not None and parent_id is None)
+            or not isinstance(name, str)
+            or not name.strip()
+            or collection_id in by_id
+        ):
+            raise RequestError(502, "Intercom returned invalid collection identity")
+        by_id[collection_id] = {
+            "id": collection_id,
+            "name": name.strip(),
+            "parent_id": parent_id,
+            "help_center_id": help_center["id"],
+        }
+
+    def collection_path(collection_id):
+        names = []
+        seen = set()
+        current = collection_id
+        while current is not None:
+            if current in seen:
+                raise RequestError(502, "Intercom collection hierarchy contains a cycle")
+            seen.add(current)
+            item = by_id.get(current)
+            if item is None:
+                raise RequestError(502, "Intercom collection hierarchy is incomplete")
+            names.append(item["name"])
+            current = item["parent_id"]
+        return " / ".join(reversed(names))
+
+    destinations = []
+    for collection_id in sorted(by_id, key=int):
+        destination = {**by_id[collection_id], "path": collection_path(collection_id)}
+        destination["fingerprint"] = _destination_fingerprint(destination)
+        destinations.append(destination)
+    destinations.sort(key=lambda item: (item["path"].casefold(), int(item["id"])))
+    catalog_hash = hashlib.sha256(
+        json.dumps(
+            destinations,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return help_center, destinations, catalog_hash
+
+
+def _list_destinations(payload, deadline):
+    operation_id = _operation_id(payload)
+    unsupported = sorted(set(payload) - {"operation", "operation_id"})
+    if unsupported:
+        raise RequestError(
+            400,
+            "Unsupported destination-list fields: " + ", ".join(unsupported),
+        )
+    help_center, destinations, catalog_hash = _destination_catalog(deadline)
+    return {
+        "ok": True,
+        "operation": "list_destinations",
+        "operation_id": operation_id,
+        "help_center": help_center,
+        "destinations": destinations,
+        "catalog_hash": catalog_hash,
+        "observed_at": datetime.datetime.now(datetime.timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z"),
+    }
+
+
+def _selected_destination(payload, deadline):
+    destination_id = _positive_ascii_id(payload.get("destination_id"))
+    destination_path = payload.get("destination_path")
+    fingerprint = payload.get("destination_fingerprint")
+    if destination_id is None:
+        raise RequestError(400, "destination_id must be a numeric Intercom collection ID")
+    if not isinstance(destination_path, str) or not destination_path.strip():
+        raise RequestError(400, "destination_path is required")
+    if not isinstance(fingerprint, str) or not SAFE_DESTINATION_FINGERPRINT.fullmatch(
+        fingerprint
+    ):
+        raise RequestError(400, "destination_fingerprint must be a lowercase SHA-256")
+
+    help_center, destinations, _ = _destination_catalog(deadline)
+    selected = next(
+        (item for item in destinations if item["id"] == destination_id), None
+    )
+    if selected is None:
+        raise RequestError(409, "Selected Intercom destination no longer exists")
+    if (
+        selected["path"] != destination_path.strip()
+        or selected["fingerprint"] != fingerprint
+    ):
+        raise RequestError(
+            409,
+            "Selected Intercom destination changed; refresh the live destination catalog",
+        )
+    return {**selected, "help_center_name": help_center["display_name"]}
+
+
 def _rich_openings(markdown):
     return {
         line.strip()
@@ -314,13 +512,19 @@ def _verify_unpublished_draft_status(article):
         raise RequestError(502, "Intercom reported an inconsistent unpublished-draft state")
 
 
-def _verify_draft(article, fields, expected_id=None):
+def _verify_draft(article, fields, expected_id=None, expected_parent_id=None):
     article_id = _verify_identity(article, expected_id)
     if article.get("state") != "draft":
         raise RequestError(502, "Intercom did not confirm unpublished draft state")
     _verify_unpublished_draft_status(article)
     _verify_unscheduled(article)
     _verify_content(article, fields)
+    if expected_parent_id is not None:
+        parent_ids = article.get("parent_ids")
+        if not isinstance(parent_ids, list) or [str(value) for value in parent_ids] != [
+            expected_parent_id
+        ]:
+            raise RequestError(502, "Intercom did not preserve the selected collection")
     return article_id
 
 
@@ -423,13 +627,16 @@ def _create(payload, deadline):
         raise RequestError(
             400, "replace_staged_draft_fingerprint is not allowed for create"
         )
+    destination = _selected_destination(payload, deadline)
     fields = _article_fields(payload)
+    fields["parent_id"] = int(destination["id"])
+    fields["parent_type"] = "collection"
     fields["state"] = "draft"
     operation_id = _operation_id(payload)
     article = _mutation_request("POST", "/articles", fields, deadline, operation_id)
     article_id = _positive_ascii_id(article.get("id"))
     try:
-        _verify_draft(article, fields)
+        _verify_draft(article, fields, expected_parent_id=destination["id"])
     except RequestError:
         raise ReconciliationRequired(operation_id, article_id)
     return {
@@ -439,10 +646,13 @@ def _create(payload, deadline):
         "after_state": "draft",
         "state": "draft",
         "draft_mode": "new",
+        "destination": destination,
     }
 
 
 def _update(payload, deadline):
+    if any(field in payload for field in DESTINATION_FIELDS):
+        raise RequestError(400, "Destination fields are not supported for update")
     article_id = _article_id(payload, required=True)
     operation_id = _operation_id(payload)
     fields = _article_fields(payload)
@@ -600,8 +810,10 @@ def main(event, context):
         _authenticate(event)
         payload = _payload(event)
         operation = payload.get("operation")
+        if operation == "list_destinations":
+            return _response(200, _list_destinations(payload, deadline))
         if operation not in ("create", "update"):
-            raise RequestError(400, "operation must be create or update")
+            raise RequestError(400, "operation must be create, update, or list_destinations")
 
         # Complete every validation step that can fail deterministically before
         # the first upstream write. In particular, computing the UTF-8 content

@@ -18,6 +18,21 @@ spec = importlib.util.spec_from_file_location("article_draft_upload", FUNCTION)
 upload = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(upload)
 UNSET = object()
+REAL_DESTINATION_CATALOG = upload._destination_catalog
+
+DESTINATION = {
+    "id": "777",
+    "name": "Account Recovery",
+    "parent_id": "700",
+    "help_center_id": "4986928",
+    "path": "Account, Login & Security / Account Recovery",
+}
+DESTINATION["fingerprint"] = upload._destination_fingerprint(DESTINATION)
+HELP_CENTER = {
+    "id": "4986928",
+    "display_name": "Edge Help Center",
+    "url": "https://support.edge.app",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +40,11 @@ def env(monkeypatch):
     monkeypatch.setenv("INTERCOM_ACCESS_TOKEN", "shared-intercom-token")
     monkeypatch.setenv("INTERCOM_DRAFT_BRIDGE_SECRET", "bridge-secret-value")
     monkeypatch.setenv("INTERCOM_ARTICLE_AUTHOR_ID", "12345")
+    monkeypatch.setattr(
+        upload,
+        "_destination_catalog",
+        lambda _deadline: (HELP_CENTER, [DESTINATION], "b" * 64),
+    )
 
 
 def event(payload, token="bridge-secret-value", method="POST"):
@@ -80,6 +100,9 @@ def create_payload(**overrides):
         "title": "Reset 2FA",
         "description": "Recovery steps",
         "body_markdown": "# Reset 2FA\n\nDo the thing.",
+        "destination_id": DESTINATION["id"],
+        "destination_path": DESTINATION["path"],
+        "destination_fingerprint": DESTINATION["fingerprint"],
         **overrides,
     }
 
@@ -108,9 +131,12 @@ def article(
     draft_updated_at=UNSET,
     scheduled_publish_at=None,
     scheduled_unpublish_at=None,
+    parent_ids=None,
 ):
     if draft_updated_at is UNSET:
         draft_updated_at = 1700000100 if pending else None
+    if parent_ids is None:
+        parent_ids = [DESTINATION["id"]]
     return {
         "id": "9001",
         "type": "article",
@@ -125,6 +151,7 @@ def article(
         "author_id": author_id,
         "scheduled_publish_at": scheduled_publish_at,
         "scheduled_unpublish_at": scheduled_unpublish_at,
+        "parent_ids": parent_ids,
     }
 
 
@@ -192,12 +219,17 @@ def test_create_forces_draft_and_returns_identity():
     assert receipt["after_state"] == "draft"
     assert receipt["state"] == "draft"
     assert receipt["draft_mode"] == "new"
+    assert receipt["destination"]["id"] == DESTINATION["id"]
+    assert receipt["destination"]["path"] == DESTINATION["path"]
+    assert receipt["destination"]["fingerprint"] == DESTINATION["fingerprint"]
     assert re.fullmatch(r"[0-9a-f]{64}", receipt["submitted_content_hash"])
     assert receipt["completed_at"].endswith("Z")
     sent = request.call_args.kwargs["json"]
     headers = request.call_args.kwargs["headers"]
     assert sent["state"] == "draft"
     assert sent["author_id"] == 12345
+    assert sent["parent_id"] == int(DESTINATION["id"])
+    assert sent["parent_type"] == "collection"
     assert headers["Authorization"] == "Bearer shared-intercom-token"
     assert request.call_args.args[:2] == (
         "POST",
@@ -244,6 +276,117 @@ def test_create_reconciles_if_intercom_returns_the_wrong_description():
         result = upload.main(event(create_payload()), None)
 
     assert_reconciliation(result, "9001")
+
+
+def test_create_reconciles_if_intercom_returns_the_wrong_collection():
+    created = article(parent_ids=["778"])
+    with patch.object(upload.requests, "request", return_value=response(created)):
+        result = upload.main(event(create_payload()), None)
+
+    assert_reconciliation(result, "9001")
+
+
+def test_create_rejects_a_stale_destination_selection_before_mutation():
+    payload = create_payload(destination_fingerprint="0" * 64)
+    with patch.object(upload.requests, "request") as request:
+        result = upload.main(event(payload), None)
+
+    assert result["statusCode"] == 409
+    request.assert_not_called()
+
+
+def test_destination_catalog_uses_the_live_default_help_center_and_new_collections(monkeypatch):
+    monkeypatch.setattr(upload, "_destination_catalog", REAL_DESTINATION_CATALOG)
+    help_centers = {
+        "data": [
+            {
+                "id": "4986928",
+                "display_name": "Edge Help Center",
+                "url": "https://support.edge.app",
+                "default": True,
+                "website_turned_on": True,
+            },
+            {
+                "id": "5014220",
+                "display_name": "Customer Success",
+                "url": "https://intercom.help/customer-success",
+                "default": False,
+                "website_turned_on": False,
+            },
+        ]
+    }
+    first_page = {
+        "data": [
+            {
+                "id": "900",
+                "name": "Brand New Root",
+                "parent_id": None,
+                "help_center_id": 4986928,
+            },
+            {
+                "id": "999",
+                "name": "Brand New Section",
+                "parent_id": "900",
+                "help_center_id": 4986928,
+            },
+            {
+                "id": "1001",
+                "name": "Inactive destination",
+                "parent_id": None,
+                "help_center_id": 5014220,
+            },
+        ],
+        "pages": {"next": {"starting_after": "page-2"}},
+    }
+    second_page = {
+        "data": [
+            {
+                "id": "1000",
+                "name": "Another Live Root",
+                "parent_id": None,
+                "help_center_id": 4986928,
+            }
+        ],
+        "pages": {"next": None},
+    }
+    with patch.object(
+        upload.requests,
+        "request",
+        side_effect=[response(help_centers), response(first_page), response(second_page)],
+    ) as request:
+        help_center, destinations, catalog_hash = REAL_DESTINATION_CATALOG(
+            upload.time.monotonic() + 30
+        )
+
+    assert help_center["id"] == "4986928"
+    assert [item["id"] for item in destinations] == ["1000", "900", "999"]
+    selected = next(item for item in destinations if item["id"] == "999")
+    assert selected["path"] == "Brand New Root / Brand New Section"
+    assert re.fullmatch(r"[0-9a-f]{64}", selected["fingerprint"])
+    assert re.fullmatch(r"[0-9a-f]{64}", catalog_hash)
+    assert request.call_args_list[2].args[1].endswith(
+        "/help_center/collections?per_page=150&starting_after=page-2"
+    )
+
+
+def test_list_destinations_returns_a_live_catalog_without_mutation():
+    result = upload.main(
+        event(
+            {
+                "operation": "list_destinations",
+                "operation_id": "kb-test-destinations-0001",
+            }
+        ),
+        None,
+    )
+
+    assert result["statusCode"] == 200
+    receipt = body(result)
+    assert receipt["operation"] == "list_destinations"
+    assert receipt["operation_id"] == "kb-test-destinations-0001"
+    assert receipt["help_center"] == HELP_CENTER
+    assert receipt["destinations"] == [DESTINATION]
+    assert receipt["catalog_hash"] == "b" * 64
 
 
 @pytest.mark.parametrize(
@@ -916,6 +1059,23 @@ def test_unsupported_fields_are_rejected_before_intercom(extra):
 def test_article_id_matches_operation(payload):
     with patch.object(upload.requests, "request") as request:
         result = upload.main(event(payload), None)
+    assert result["statusCode"] == 400
+    request.assert_not_called()
+
+
+def test_update_rejects_destination_fields_before_intercom():
+    with patch.object(upload.requests, "request") as request:
+        result = upload.main(
+            event(
+                update_payload(
+                    destination_id=DESTINATION["id"],
+                    destination_path=DESTINATION["path"],
+                    destination_fingerprint=DESTINATION["fingerprint"],
+                )
+            ),
+            None,
+        )
+
     assert result["statusCode"] == 400
     request.assert_not_called()
 
