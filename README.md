@@ -98,11 +98,12 @@ explicitly.
 ## Intercom article draft bridge
 
 `intercom-article-drafts/upload` is a small authenticated bridge for creating
-and updating Intercom drafts. It supports three draft outcomes while keeping
-publication, deletion, placement, scheduling, and arbitrary upstream calls
-unreachable:
+and updating Intercom drafts. It also exposes a read-only live destination
+catalog. It supports three draft outcomes while keeping publication, deletion,
+scheduling, and arbitrary upstream calls unreachable:
 
-- create a new unpublished article draft;
+- create a new unpublished article draft in an exact current collection or
+  subcollection;
 - update an existing never-published draft; or
 - stage unpublished changes over an existing published article while leaving
   its live version unchanged.
@@ -116,6 +117,9 @@ Create a new draft:
 {
   "operation": "create",
   "operation_id": "kb-occurrence-0123456789abcdef",
+  "destination_id": "19132099",
+  "destination_path": "Account, Login & Security / Account Recovery",
+  "destination_fingerprint": "<sha256>",
   "title": "How to reset 2FA",
   "description": "Recovery steps for Edge accounts",
   "body_markdown": "# How to reset 2FA\n\n..."
@@ -126,6 +130,22 @@ Send requests as `POST` with
 `Authorization: Bearer $INTERCOM_DRAFT_BRIDGE_SECRET`.
 `description` is required; Intercom renders it as the short line directly
 beneath the article title.
+
+Fetch the current selectable destinations first:
+
+```json
+{
+  "operation": "list_destinations",
+  "operation_id": "kb-occurrence-0123456789abcdef"
+}
+```
+
+The broker discovers the one active default Help Center and all of its current
+collections/subcollections on every call. It returns exact IDs, full
+hierarchical paths, per-destination fingerprints, and a catalog hash. A create
+refreshes that live inventory, rejects a stale selection before mutation,
+sends the selected collection as Intercom's parent, and verifies the returned
+parent ID. No collection list or Help Center ID is hardcoded.
 
 Update a known article by its exact Intercom article ID:
 
@@ -191,6 +211,15 @@ caller and its post-draft review-link resolver:
   "after_state": "draft",
   "state": "draft",
   "draft_mode": "new",
+  "destination": {
+    "id": "19132099",
+    "name": "Account Recovery",
+    "parent_id": "19132097",
+    "help_center_id": "4986928",
+    "help_center_name": "Edge Help Center",
+    "path": "Account, Login & Security / Account Recovery",
+    "fingerprint": "<sha256>"
+  },
   "completed_at": "2026-08-24T22:00:00Z",
   "submitted_content_hash": "<sha256>"
 }
@@ -200,7 +229,7 @@ For updates, `result` is `updated_draft` or `staged_draft`; the latter reports
 `after_state: published_with_draft`, `state: published`, and
 `has_unpublished_changes: true`, plus the exact remote
 `staged_draft_fingerprint` and `draft_updated_at` that may authorize a later
-replacement. The broker never exposes a publish, delete, placement, or
+replacement. The broker never exposes a publish, delete, reparent, or
 scheduling operation, and rejects every request field outside its small
 content-and-identity allowlist.
 
