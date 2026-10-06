@@ -1,5 +1,4 @@
 .env
-services/testrail-files/app-spec.local.yaml
 __pycache__/
 *.pyc
 .venv/

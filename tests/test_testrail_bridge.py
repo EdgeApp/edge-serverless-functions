@@ -21,11 +21,16 @@ def env(monkeypatch):
     monkeypatch.setenv("TESTRAIL_BRIDGE_SECRET", "bridge-secret-value")
 
 
-def event(payload, token="bridge-secret-value", method="POST"):
+def event(payload, token="bridge-secret-value", method="POST", headers=None):
+    request_headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    request_headers.update(headers or {})
     return {
         "http": {
             "method": method,
-            "headers": {"Authorization": f"Bearer {token}"},
+            "headers": request_headers,
             "body": json.dumps(payload),
         }
     }
@@ -43,6 +48,14 @@ def response(data=None, status=200, headers=None):
         result.content = json.dumps(data).encode()
         result.text = json.dumps(data)
         result.json.return_value = data
+    return result
+
+
+def binary_response(data, status=200, headers=None):
+    result = MagicMock()
+    result.status_code = status
+    result.headers = headers or {"Content-Type": "application/octet-stream"}
+    result.iter_content.return_value = [data]
     return result
 
 
@@ -138,7 +151,7 @@ def test_all_delete_endpoints_are_blocked_before_testrail(endpoint):
         {"items": [{"title": "Safe"}, {"is_deleted": 1}]},
     ],
 )
-def test_is_deleted_is_blocked_anywhere_in_request_body(payload_body):
+def test_destructive_is_deleted_is_blocked_anywhere_in_request_body(payload_body):
     with patch.object(bridge.requests, "request") as request:
         result = bridge.main(
             event(
@@ -152,20 +165,39 @@ def test_is_deleted_is_blocked_anywhere_in_request_body(payload_body):
         )
 
     assert result["statusCode"] == 403
-    assert body(result)["error"] == "The is_deleted field is blocked"
+    assert body(result)["error"] == (
+        "Setting is_deleted to a destructive value is blocked"
+    )
     request.assert_not_called()
 
 
-def test_is_deleted_is_blocked_in_query_params():
-    with patch.object(bridge.requests, "request") as request:
+@pytest.mark.parametrize("value", [0, False, "0", None])
+def test_is_deleted_restore_values_are_allowed(value):
+    with patch.object(
+        bridge.requests,
+        "request",
+        return_value=response({"id": 42, "is_deleted": 0}),
+    ) as request:
+        result = bridge.main(
+            event({"endpoint": "update_case/42", "body": {"is_deleted": value}}),
+            None,
+        )
+
+    assert result["statusCode"] == 200
+    assert request.call_args.kwargs["json"] == {"is_deleted": value}
+
+
+def test_is_deleted_is_allowed_in_read_query_params():
+    with patch.object(
+        bridge.requests, "request", return_value=response({"cases": []})
+    ) as request:
         result = bridge.main(
             event({"endpoint": "get_cases/1", "params": {"is_deleted": 1}}),
             None,
         )
 
-    assert result["statusCode"] == 403
-    assert body(result)["error"] == "The is_deleted field is blocked"
-    request.assert_not_called()
+    assert result["statusCode"] == 200
+    assert request.call_args.args[1].endswith("&is_deleted=1")
 
 
 def test_missing_or_wrong_bridge_secret_is_rejected():
@@ -203,11 +235,131 @@ def test_only_relative_testrail_method_paths_are_allowed(endpoint):
     request.assert_not_called()
 
 
-def test_mutation_requires_operation_id():
-    result = bridge.main(event({"endpoint": "add_case/7", "body": {"title": "A"}}), None)
+def test_mutation_does_not_require_operation_id():
+    with patch.object(
+        bridge.requests,
+        "request",
+        return_value=response({"id": 43, "title": "A"}),
+    ):
+        result = bridge.main(
+            event({"endpoint": "add_case/7", "body": {"title": "A"}}), None
+        )
 
-    assert result["statusCode"] == 400
-    assert "operation_id" in body(result)["error"]
+    assert result["statusCode"] == 200
+    assert body(result)["operation_id"] is None
+
+
+def test_multipart_attachment_upload_is_forwarded_without_buffer_reencoding():
+    multipart = (
+        b"--edge\r\n"
+        b'Content-Disposition: form-data; name="attachment"; filename="shot.png"\r\n'
+        b"Content-Type: image/png\r\n\r\n"
+        b"png-bytes\r\n--edge--\r\n"
+    )
+    upload_event = {
+        "http": {
+            "method": "POST",
+            "headers": {
+                "Authorization": "Bearer bridge-secret-value",
+                "Content-Type": "multipart/form-data; boundary=edge",
+                "X-TestRail-Endpoint": "add_attachment_to_case/42",
+            },
+            "body": bridge.base64.b64encode(multipart).decode("ascii"),
+            "isBase64Encoded": True,
+        }
+    }
+    with patch.object(
+        bridge.requests,
+        "request",
+        return_value=response({"attachment_id": "attachment-1"}),
+    ) as request:
+        result = bridge.main(upload_event, None)
+
+    assert result["statusCode"] == 200
+    assert body(result)["upstream_body"] == {"attachment_id": "attachment-1"}
+    assert request.call_args.args == (
+        "POST",
+        "https://edge.testrail.io/index.php?/api/v2/add_attachment_to_case/42",
+    )
+    assert request.call_args.kwargs["data"] == multipart
+    assert request.call_args.kwargs["headers"]["Content-Type"] == (
+        "multipart/form-data; boundary=edge"
+    )
+
+
+def test_multipart_attachment_upload_rejects_oversized_body():
+    upload_event = {
+        "http": {
+            "method": "POST",
+            "headers": {
+                "Authorization": "Bearer bridge-secret-value",
+                "Content-Type": "multipart/form-data; boundary=edge",
+                "X-TestRail-Endpoint": "add_attachment_to_case/42",
+            },
+            "body": bridge.base64.b64encode(
+                b"x" * (bridge.MAX_MULTIPART_BODY_BYTES + 1)
+            ).decode("ascii"),
+            "isBase64Encoded": True,
+        }
+    }
+    with patch.object(bridge.requests, "request") as request:
+        result = bridge.main(upload_event, None)
+
+    assert result["statusCode"] == 413
+    assert body(result)["max_attachment_bytes"] == bridge.MAX_ATTACHMENT_BYTES
+    request.assert_not_called()
+
+
+def test_attachment_download_returns_binary_body_and_safe_headers():
+    upstream = binary_response(
+        b"png-bytes",
+        headers={
+            "Content-Type": "image/png",
+            "Content-Disposition": 'attachment; filename="shot.png"',
+        },
+    )
+    with patch.object(bridge.requests, "request", return_value=upstream) as request:
+        result = bridge.main(event({"endpoint": "get_attachment/attachment-1"}), None)
+
+    assert result == {
+        "statusCode": 200,
+        "headers": {
+            "content-type": "image/png",
+            "content-disposition": 'attachment; filename="shot.png"',
+            "cache-control": "no-store",
+        },
+        "body": bridge.base64.b64encode(b"png-bytes").decode("ascii"),
+    }
+    assert request.call_args.kwargs["stream"] is True
+
+
+def test_attachment_download_rejects_oversized_response():
+    upstream = binary_response(
+        b"unused",
+        headers={
+            "Content-Type": "image/png",
+            "Content-Length": str(bridge.MAX_ATTACHMENT_BYTES + 1),
+        },
+    )
+    with patch.object(bridge.requests, "request", return_value=upstream):
+        result = bridge.main(event({"endpoint": "get_attachment/attachment-1"}), None)
+
+    assert result["statusCode"] == 413
+    assert body(result)["max_attachment_bytes"] == bridge.MAX_ATTACHMENT_BYTES
+
+
+def test_oversized_json_response_requests_a_smaller_page():
+    with patch.object(
+        bridge.requests,
+        "request",
+        return_value=response(
+            {"cases": ["x" * bridge.MAX_FUNCTION_RESULT_BYTES]}
+        ),
+    ):
+        result = bridge.main(event({"endpoint": "get_cases/1"}), None)
+
+    assert result["statusCode"] == 413
+    assert body(result)["hint"] == "Request a smaller page with limit and offset"
 
 
 def test_upstream_429_and_retry_after_are_returned():
@@ -285,6 +437,7 @@ def test_manifest_and_deploy_surface_are_scoped():
     assert "TESTRAIL_API_KEY: ${TESTRAIL_API_KEY}" in manifest
     assert "TESTRAIL_BRIDGE_SECRET: ${TESTRAIL_BRIDGE_SECRET}" in manifest
     assert "- name: bridge" in manifest
+    assert "web: raw" in manifest
 
     action_root = PROJECT_ROOT / "packages/testrail"
     assert sorted(path.name for path in action_root.iterdir() if path.is_dir()) == [

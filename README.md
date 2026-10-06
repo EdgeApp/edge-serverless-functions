@@ -6,13 +6,15 @@ handled by a single `intercom/webhook` function that routes by topic.
 ## TestRail API bridge
 
 `testrail/bridge` keeps the TestRail API key in DigitalOcean while exposing a
-small authenticated JSON relay. It accepts ordinary TestRail API method names,
+small authenticated API relay. It accepts ordinary TestRail API method names,
 uses `GET` for `get_*` methods and `POST` for every other method, and returns the
 upstream status and JSON body in a structured receipt.
 
-The bridge blocks every `delete_*` method and rejects `is_deleted` anywhere in
-a request body. The upstream origin is fixed by `TESTRAIL_BASE_URL`; callers
-cannot provide a URL or redirect the credential elsewhere.
+The bridge blocks every `delete_*` method and rejects destructive
+`is_deleted` values in write bodies. Reads may query deleted cases, and writes
+may use `is_deleted: 0` to restore a case. The upstream origin is fixed by
+`TESTRAIL_BASE_URL`; callers cannot provide a URL or redirect the credential
+elsewhere.
 
 Read a case:
 
@@ -40,65 +42,58 @@ TestRail's `index.php?/api/v2/<method>&key=value` URL format. Send every call as
 `POST` to the bridge with `Authorization: Bearer $TESTRAIL_BRIDGE_SECRET`.
 
 Successful receipts include `upstream_status`, `upstream_body`, the inferred
-upstream method, and the caller's `operation_id`. TestRail 4xx responses are
+upstream method, and the caller's optional `operation_id`. TestRail 4xx responses are
 returned as deterministic rejections. A timeout or connection failure during a
 mutation is reported as `outcome: unknown` and `retry_safe: false`; do not
 blindly retry it because TestRail may have committed the write before the
 response was lost.
 
-### Deploy or update both bridges
-
-The operator path is one idempotent command from the repository root:
-
-```bash
-./scripts/deploy-testrail.sh
-```
-
-The script validates the four required `.env` entries, deploys only the JSON
-action, creates or updates the attachment service, performs read-only health and
-`get_projects` checks, and prints both URLs. It does not run the repository test
-suite; tests and Python runtime selection are build/CI responsibilities, not a
-production deployment prerequisite. To validate credentials and renderability
-without contacting DigitalOcean, run `./scripts/deploy-testrail.sh --check`.
-
 ### TestRail attachments
 
-DigitalOcean Functions limits both requests and responses to 1 MB, while
-TestRail accepts attachments up to 256 MB. `services/testrail-files` is a small
-streaming App Platform service for the binary transfer path. It uses the same
-four environment variables and the same fixed-origin/deletion-blocking policy
-as the JSON function.
+The same Function proxies TestRail attachment uploads and downloads up to
+700,000 bytes. The conservative cap leaves room for multipart and base64
+overhead inside DigitalOcean Functions' 1 MB input and output limits.
 
-Download an attachment without exposing the TestRail credential:
-
-```bash
-curl --fail --location \
-  -H "Authorization: Bearer $TESTRAIL_BRIDGE_SECRET" \
-  --output screenshot.png \
-  "$TESTRAIL_FILES_URL/attachments/$ATTACHMENT_ID"
-```
-
-Upload to any documented TestRail attachment target:
+Upload an attachment by sending the multipart body directly to the bridge and
+putting the TestRail method in `X-TestRail-Endpoint`:
 
 ```bash
-curl --fail \
+curl --fail-with-body \
   -H "Authorization: Bearer $TESTRAIL_BRIDGE_SECRET" \
+  -H "X-TestRail-Endpoint: add_attachment_to_case/42" \
   -F "attachment=@screenshot.png" \
-  "$TESTRAIL_FILES_URL/attachments/add_attachment_to_case/$CASE_ID"
+  "$TESTRAIL_BRIDGE_URL"
 ```
 
-The upload path also supports `add_attachment_to_plan`,
-`add_attachment_to_plan_entry`, `add_attachment_to_result`, and
-`add_attachment_to_run`. Uploads spool to App Platform's temporary disk and
-then stream to TestRail; downloads stream directly back to the caller. Neither
-path packs file bytes into a Function response. The service adds no file-size
-policy; TestRail's own 256 MB maximum and App Platform's 600-second upload
-timeout are the effective limits.
+Download an attachment by calling `get_attachment/<attachment_id>` through the
+normal JSON request shape. The response is the attachment bytes rather than a
+JSON receipt:
 
-The deployment script renders the App Platform spec into a mode-restricted
-temporary file and removes it on exit. The example spec deploys from `main` and
-enables deploy-on-push; DigitalOcean encrypts fields marked `SECRET` after
-accepting the spec.
+```bash
+curl --fail-with-body \
+  -H "Authorization: Bearer $TESTRAIL_BRIDGE_SECRET" \
+  -H "Content-Type: application/json" \
+  --data '{"endpoint":"get_attachment/attachment-id"}' \
+  --output screenshot.png \
+  "$TESTRAIL_BRIDGE_URL"
+```
+
+### TestRail exports and pagination
+
+Large TestRail collections should be exported page by page. Pass `limit` and
+`offset` in `params`, request up to TestRail's maximum 250 records per page,
+follow the returned pagination links, and combine the pages locally. A page
+that would exceed the Function response limit is rejected with a `413` and an
+instruction to request a smaller page. This does not prevent a complete local
+export; it prevents one oversized response.
+
+### TestRail roadmap
+
+If routine attachments exceed 700,000 bytes, replace this Function with a
+dedicated Cloudflare Worker that streams JSON and attachment traffic while
+preserving the same deletion-only policy. Do not add a paid DigitalOcean App
+Platform service for this bridge unless that hosting decision is made
+explicitly.
 
 ## Intercom article draft bridge
 
@@ -323,7 +318,7 @@ edge-serverless-functions/
 ├── README.md
 ├── packages/
 │   ├── testrail/
-│   │   └── bridge/                        # Authenticated TestRail JSON relay
+│   │   └── bridge/                        # Authenticated TestRail API relay
 │   ├── intercom-article-drafts/
 │   │   └── upload/                        # Authenticated draft function
 │   └── intercom/
@@ -436,7 +431,7 @@ function URL and subscribe to these topics:
 ### Unit tests (no API keys needed)
 
 ```bash
-pip install pytest phonenumbers -r services/testrail-files/requirements.txt
+pip install pytest phonenumbers requests
 pytest tests/ -v
 ```
 

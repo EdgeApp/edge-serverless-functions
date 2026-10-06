@@ -1,4 +1,4 @@
-"""Authenticated, deletion-blocking bridge to the TestRail JSON API."""
+"""Authenticated TestRail API bridge that blocks destructive deletion."""
 
 import base64
 import binascii
@@ -11,7 +11,10 @@ from urllib.parse import urlencode, urlsplit
 import requests
 
 CONNECT_TIMEOUT_SECONDS = 2.0
-READ_TIMEOUT_SECONDS = 15.0
+READ_TIMEOUT_SECONDS = 40.0
+MAX_ATTACHMENT_BYTES = 700_000
+MAX_MULTIPART_BODY_BYTES = 720_000
+MAX_FUNCTION_RESULT_BYTES = 980_000
 ALLOWED_PAYLOAD_FIELDS = {"body", "endpoint", "operation_id", "params"}
 ENDPOINT_PATTERN = re.compile(
     r"^(?P<action>[a-z][a-z0-9_]*)(?:/[A-Za-z0-9][A-Za-z0-9._~-]*)*$"
@@ -31,10 +34,40 @@ def _response(status_code, body, headers=None):
     response_headers = {"content-type": "application/json"}
     if headers:
         response_headers.update(headers)
-    return {
+    result = {
         "statusCode": status_code,
         "headers": response_headers,
         "body": json.dumps(body),
+    }
+    if len(json.dumps(result).encode("utf-8")) <= MAX_FUNCTION_RESULT_BYTES:
+        return result
+    return {
+        "statusCode": 413,
+        "headers": {"content-type": "application/json"},
+        "body": json.dumps(
+            {
+                "ok": False,
+                "error": "TestRail response exceeds the Function response limit",
+                "hint": "Request a smaller page with limit and offset",
+            }
+        ),
+    }
+
+
+def _binary_response(response, content):
+    headers = {
+        "content-type": response.headers.get(
+            "Content-Type", "application/octet-stream"
+        ),
+        "cache-control": "no-store",
+    }
+    disposition = response.headers.get("Content-Disposition")
+    if disposition:
+        headers["content-disposition"] = disposition
+    return {
+        "statusCode": response.status_code,
+        "headers": headers,
+        "body": base64.b64encode(content).decode("ascii"),
     }
 
 
@@ -56,7 +89,7 @@ def _authenticate(event):
         raise RequestError(401, "Unauthorized")
 
 
-def _payload(event):
+def _request_bytes(event):
     http = event.get("http", {})
     if http.get("method", "POST").upper() != "POST":
         raise RequestError(405, "Only POST is supported")
@@ -64,9 +97,19 @@ def _payload(event):
     raw = http.get("body", "")
     if http.get("isBase64Encoded"):
         try:
-            raw = base64.b64decode(raw, validate=True).decode("utf-8")
-        except (binascii.Error, TypeError, UnicodeDecodeError):
-            raise RequestError(400, "Request body must be valid base64-encoded JSON")
+            return base64.b64decode(raw, validate=True)
+        except (binascii.Error, TypeError):
+            raise RequestError(400, "Request body must be valid base64")
+    if not isinstance(raw, str):
+        raise RequestError(400, "Request body must be text or base64")
+    return raw.encode("utf-8")
+
+
+def _payload(event):
+    try:
+        raw = _request_bytes(event).decode("utf-8")
+    except UnicodeDecodeError:
+        raise RequestError(400, "Request body must be valid JSON")
     try:
         value = json.loads(raw)
     except (TypeError, ValueError, UnicodeDecodeError):
@@ -94,9 +137,9 @@ def _endpoint(payload):
     return endpoint, action
 
 
-def _operation_id(payload, required):
+def _operation_id(payload):
     operation_id = payload.get("operation_id")
-    if operation_id is None and not required:
+    if operation_id is None:
         return None
     if not isinstance(operation_id, str) or not OPERATION_ID_PATTERN.fullmatch(
         operation_id
@@ -105,25 +148,27 @@ def _operation_id(payload, required):
     return operation_id
 
 
-def _contains_is_deleted(value):
+def _contains_destructive_is_deleted(value):
     if isinstance(value, dict):
-        return any(
-            key == "is_deleted" or _contains_is_deleted(item)
-            for key, item in value.items()
-        )
+        for key, item in value.items():
+            if key == "is_deleted" and item not in (0, False, "0", None):
+                return True
+            if _contains_destructive_is_deleted(item):
+                return True
+        return False
     if isinstance(value, list):
-        return any(_contains_is_deleted(item) for item in value)
+        return any(_contains_destructive_is_deleted(item) for item in value)
     return False
 
 
-def _body(payload, required):
+def _body(payload):
     value = payload.get("body")
-    if value is None and not required:
+    if value is None:
         return None
     if not isinstance(value, dict):
         raise RequestError(400, "body must be a JSON object")
-    if _contains_is_deleted(value):
-        raise RequestError(403, "The is_deleted field is blocked")
+    if _contains_destructive_is_deleted(value):
+        raise RequestError(403, "Setting is_deleted to a destructive value is blocked")
     return value
 
 
@@ -134,8 +179,6 @@ def _params(payload):
     for key, item in value.items():
         if not isinstance(key, str) or not key:
             raise RequestError(400, "params keys must be non-empty strings")
-        if key == "is_deleted":
-            raise RequestError(403, "The is_deleted field is blocked")
         items = item if isinstance(item, list) else [item]
         if not all(
             element is None or isinstance(element, (str, int, float, bool))
@@ -190,7 +233,66 @@ def _call_testrail(method, endpoint, params, body):
         json=body,
         timeout=(CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS),
         allow_redirects=False,
+        stream=endpoint.split("/", 1)[0] == "get_attachment",
     )
+
+
+def _multipart_endpoint(event):
+    endpoint = _event_headers(event).get("x-testrail-endpoint")
+    return _endpoint({"endpoint": endpoint})
+
+
+def _call_testrail_multipart(event, endpoint):
+    content_type = _event_headers(event).get("content-type", "")
+    if not content_type.lower().startswith("multipart/form-data;"):
+        raise RequestError(400, "Multipart requests require a boundary")
+    body = _request_bytes(event)
+    if len(body) > MAX_MULTIPART_BODY_BYTES:
+        raise RequestError(
+            413,
+            "Attachment exceeds the Function upload limit",
+            max_attachment_bytes=MAX_ATTACHMENT_BYTES,
+        )
+    return requests.request(
+        "POST",
+        _url(endpoint, {}),
+        auth=(os.environ["TESTRAIL_USER_EMAIL"], os.environ["TESTRAIL_API_KEY"]),
+        headers={
+            "Accept": "application/json",
+            "Content-Type": content_type,
+            "User-Agent": "Edge-TestRail-Bridge/1.0",
+        },
+        data=body,
+        timeout=(CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS),
+        allow_redirects=False,
+    )
+
+
+def _limited_attachment_content(response):
+    content_length = response.headers.get("Content-Length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_ATTACHMENT_BYTES:
+                raise RequestError(
+                    413,
+                    "Attachment exceeds the Function download limit",
+                    max_attachment_bytes=MAX_ATTACHMENT_BYTES,
+                )
+        except ValueError:
+            pass
+
+    content = bytearray()
+    for chunk in response.iter_content(chunk_size=64 * 1024):
+        if not chunk:
+            continue
+        content.extend(chunk)
+        if len(content) > MAX_ATTACHMENT_BYTES:
+            raise RequestError(
+                413,
+                "Attachment exceeds the Function download limit",
+                max_attachment_bytes=MAX_ATTACHMENT_BYTES,
+            )
+    return bytes(content)
 
 
 def main(event, context):
@@ -199,16 +301,25 @@ def main(event, context):
     operation_id = None
     try:
         _authenticate(event)
-        payload = _payload(event)
-        endpoint, action = _endpoint(payload)
-        method = "GET" if action.startswith("get_") else "POST"
-        operation_id = _operation_id(payload, required=method == "POST")
-        body = _body(payload, required=False)
-        if method == "GET" and body is not None:
-            raise RequestError(400, "GET endpoints do not accept body")
-        params = _params(payload)
+        content_type = _event_headers(event).get("content-type", "")
+        if content_type.lower().startswith("multipart/form-data"):
+            endpoint, action = _multipart_endpoint(event)
+            method = "POST"
+            response = _call_testrail_multipart(event, endpoint)
+        else:
+            payload = _payload(event)
+            endpoint, action = _endpoint(payload)
+            method = "GET" if action.startswith("get_") else "POST"
+            operation_id = _operation_id(payload)
+            body = _body(payload)
+            if method == "GET" and body is not None:
+                raise RequestError(400, "GET endpoints do not accept body")
+            params = _params(payload)
+            response = _call_testrail(method, endpoint, params, body)
 
-        response = _call_testrail(method, endpoint, params, body)
+        if action == "get_attachment" and 200 <= response.status_code < 300:
+            return _binary_response(response, _limited_attachment_content(response))
+
         upstream_body = _upstream_body(response)
         receipt = {
             "ok": 200 <= response.status_code < 300,
