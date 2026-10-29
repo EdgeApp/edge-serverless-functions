@@ -63,6 +63,7 @@ def _make_event(payload_dict, secret=WEBHOOK_SECRET, signature_override=None, ra
         "http": {
             "method": "POST",
             "headers": {
+                "accept": "application/json",
                 "content-type": "application/json",
                 "x-hub-signature": sig,
             },
@@ -81,6 +82,7 @@ def _make_event_base64(payload_dict, secret=WEBHOOK_SECRET):
         "http": {
             "method": "POST",
             "headers": {
+                "accept": "application/json",
                 "content-type": "application/json",
                 "x-hub-signature": sig,
             },
@@ -165,7 +167,11 @@ class TestSignatureVerification:
     def test_invalid_signature_rejected(self):
         event = _make_event(_make_payload(), signature_override="sha1=bogus")
         result = handler.main(event, None)
-        assert result["statusCode"] == 401
+        assert result == {
+            "statusCode": 401,
+            "headers": {"Content-Type": "application/json"},
+            "body": {"message": "Invalid signature"},
+        }
 
     def test_missing_signature_rejected(self):
         event = _make_event(_make_payload())
@@ -193,7 +199,11 @@ class TestSignatureVerification:
 
         result = handler.main(event, None)
 
-        assert result == {"statusCode": 200, "body": "Ignored"}
+        assert result == {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": {"message": "Ignored"},
+        }
 
     def test_missing_secret_fails_closed(self, monkeypatch):
         monkeypatch.delenv("WEBHOOK_SECRET")
@@ -209,7 +219,16 @@ class TestSignatureVerification:
 
         result = handler.main(event, None)
 
-        assert result == {"statusCode": 405, "body": "Method not allowed"}
+        assert result == {
+            "statusCode": 405,
+            "headers": {"Content-Type": "application/json"},
+            "body": {"message": "Method not allowed"},
+        }
+
+    def test_head_validation_remains_empty_success(self):
+        result = handler.main({"http": {"method": "HEAD"}}, None)
+
+        assert result == {"statusCode": 200, "body": ""}
 
 
 # ── Topic routing ───────────────────────────────────────────────────
@@ -221,7 +240,8 @@ class TestTopicRouting:
         event = _make_event(payload)
         result = handler.main(event, None)
         assert result["statusCode"] == 200
-        assert result["body"] == "Ignored"
+        assert result["headers"] == {"Content-Type": "application/json"}
+        assert result["body"] == {"message": "Ignored"}
 
     def test_lead_created_topic_dispatches(self):
         event = _make_event(_make_payload(topic="contact.lead.created"))
@@ -235,7 +255,7 @@ class TestTopicRouting:
             ]
             result = handler.main(event, None)
         assert result["statusCode"] == 200
-        assert result["body"] == "OK"
+        assert result["body"] == {"message": "OK"}
 
     def test_lead_added_email_topic_dispatches(self):
         event = _make_event(_make_payload(topic="contact.lead.added_email"))
@@ -249,7 +269,7 @@ class TestTopicRouting:
             ]
             result = handler.main(event, None)
         assert result["statusCode"] == 200
-        assert result["body"] == "OK"
+        assert result["body"] == {"message": "OK"}
 
     def test_email_updated_topic_dispatches(self):
         event = _make_event(_make_payload(topic="contact.email.updated"))
@@ -263,21 +283,64 @@ class TestTopicRouting:
             ]
             result = handler.main(event, None)
         assert result["statusCode"] == 200
-        assert result["body"] == "OK"
+        assert result["body"] == {"message": "OK"}
 
     def test_call_ended_topic_dispatches_to_switch_handler(self):
         payload = _make_payload(topic="call.ended")
         payload["data"]["item"] = {"type": "call", "id": "call_123"}
         event = _make_event(payload)
-        expected = {"statusCode": 200, "body": '{"outcome":"promoted"}'}
+        handler_response = {
+            "statusCode": 200,
+            "headers": {"content-type": "application/json"},
+            "body": '{"ok":true,"outcome":"promoted"}',
+        }
 
         with patch(
-            "switch_promotion.handler.handle", return_value=expected
+            "switch_promotion.handler.handle", return_value=handler_response
         ) as handle_switch:
             result = handler.main(event, None)
 
-        assert result == expected
+        assert result == {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": {"ok": True, "outcome": "promoted"},
+        }
         handle_switch.assert_called_once_with(payload)
+
+    def test_switch_handler_failure_preserves_retry_status(self):
+        payload = _make_payload(topic="call.ended")
+        payload["data"]["item"] = {"type": "call", "id": "call_123"}
+        event = _make_event(payload)
+        handler_response = {
+            "statusCode": 500,
+            "headers": {"content-type": "application/json"},
+            "body": '{"ok":false,"outcome":"retry_required"}',
+        }
+
+        with patch(
+            "switch_promotion.handler.handle", return_value=handler_response
+        ):
+            result = handler.main(event, None)
+
+        assert result == {
+            "statusCode": 500,
+            "headers": {"Content-Type": "application/json"},
+            "body": {"ok": False, "outcome": "retry_required"},
+        }
+
+    def test_invalid_handler_response_fails_closed(self):
+        payload = _make_payload(topic="call.ended")
+        payload["data"]["item"] = {"type": "call", "id": "call_123"}
+        event = _make_event(payload)
+
+        with patch("switch_promotion.handler.handle", return_value=None):
+            result = handler.main(event, None)
+
+        assert result == {
+            "statusCode": 500,
+            "headers": {"Content-Type": "application/json"},
+            "body": {"message": "Invalid handler response"},
+        }
 
 
 # ── Lead routing ────────────────────────────────────────────────────
@@ -406,7 +469,7 @@ class TestLeadRouting:
         event = _make_event(payload, raw_body_override=raw_body)
         result = handler.main(event, None)
         assert result["statusCode"] == 200
-        assert result["body"] == "Skipped"
+        assert result["body"] == {"message": "Skipped"}
 
     def test_lead_missing_id_skipped_without_api_call(self):
         payload = _make_payload()
@@ -418,7 +481,7 @@ class TestLeadRouting:
             result = handler.main(event, None)
 
         assert result["statusCode"] == 200
-        assert result["body"] == "Skipped"
+        assert result["body"] == {"message": "Skipped"}
         mock_post.assert_not_called()
 
     def test_lead_missing_user_id_falls_back_to_email(self):
@@ -438,7 +501,7 @@ class TestLeadRouting:
             result = handler.main(event, None)
 
         assert result["statusCode"] == 200
-        assert result["body"] == "OK"
+        assert result["body"] == {"message": "OK"}
         assert mock_post.call_count == 3  # one search (email), create, merge
         search_call = mock_post.call_args_list[0]
         assert search_call[1]["json"]["query"]["field"] == "email"
@@ -495,7 +558,7 @@ class TestLeadRouting:
         event = _make_event(payload, raw_body_override=raw_body)
         result = handler.main(event, None)
         assert result["statusCode"] == 200
-        assert result["body"] == "Skipped"
+        assert result["body"] == {"message": "Skipped"}
 
     def test_non_lead_contact_skipped(self):
         payload = _make_payload(role="user")
@@ -503,7 +566,7 @@ class TestLeadRouting:
         event = _make_event(payload, raw_body_override=raw_body)
         result = handler.main(event, None)
         assert result["statusCode"] == 200
-        assert result["body"] == "Skipped"
+        assert result["body"] == {"message": "Skipped"}
 
     def test_conversion_disabled_makes_no_api_calls(self, monkeypatch):
         """Default (disabled) behavior: never merge, so a live Messenger session
@@ -515,7 +578,7 @@ class TestLeadRouting:
             result = handler.main(event, None)
 
         assert result["statusCode"] == 200
-        assert result["body"] == "Skipped (conversion disabled)"
+        assert result["body"] == {"message": "Skipped (conversion disabled)"}
         mock_post.assert_not_called()
         mock_put.assert_not_called()
 
@@ -527,7 +590,7 @@ class TestLeadRouting:
             result = handler.main(event, None)
 
         assert result["statusCode"] == 200
-        assert result["body"] == "Skipped (conversion disabled)"
+        assert result["body"] == {"message": "Skipped (conversion disabled)"}
         mock_post.assert_not_called()
         mock_put.assert_not_called()
 
@@ -553,6 +616,7 @@ class TestEdgeCases:
             "http": {
                 "method": "POST",
                 "headers": {
+                    "accept": "application/json",
                     "content-type": "application/json",
                     "x-hub-signature": sig,
                 },
@@ -569,6 +633,7 @@ class TestEdgeCases:
             "http": {
                 "method": "POST",
                 "headers": {
+                    "accept": "application/json",
                     "content-type": "application/json",
                 },
                 "body": "",

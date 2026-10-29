@@ -29,6 +29,8 @@ SWITCH_TOPICS = {
     "call.ended",
 }
 
+JSON_CONTENT_TYPE = "application/json"
+
 
 def _get_raw_body(event):
     """Extract the raw HTTP body from a DO Functions raw web event."""
@@ -72,6 +74,66 @@ def _verify_signature(raw_body, signature_header, secret):
     return hmac.compare_digest(expected, provided)
 
 
+def _json_response(status_code, body, headers=None):
+    """Return a DO raw-web response with an explicit JSON representation.
+
+    Intercom sends ``Accept: application/json`` on webhook deliveries. The
+    DigitalOcean public Functions gateway rejects a successful raw action
+    response when that response has an untyped plain-text body, so every POST
+    response must declare JSON and supply a JSON-compatible body. Preserve
+    handler status codes so Intercom can still distinguish success from a
+    retryable 5xx or an authentication failure.
+    """
+    response_headers = {}
+    if isinstance(headers, dict):
+        response_headers = {
+            key: value
+            for key, value in headers.items()
+            if isinstance(key, str)
+            and isinstance(value, str)
+            and key.casefold() != "content-type"
+        }
+    response_headers["Content-Type"] = JSON_CONTENT_TYPE
+
+    json_body = body
+    if isinstance(body, str):
+        try:
+            decoded = json.loads(body)
+        except json.JSONDecodeError:
+            decoded = None
+        json_body = decoded if isinstance(decoded, (dict, list)) else {"message": body}
+    elif not isinstance(body, (dict, list)):
+        json_body = {"message": "" if body is None else str(body)}
+
+    return {
+        "statusCode": status_code,
+        "headers": response_headers,
+        "body": json_body,
+    }
+
+
+def _normalize_handler_response(response):
+    """Normalize one internal handler response without masking its status."""
+    if not isinstance(response, dict):
+        logger.error("Webhook handler returned a non-object response")
+        return _json_response(500, "Invalid handler response")
+
+    status_code = response.get("statusCode", 200)
+    if (
+        isinstance(status_code, bool)
+        or not isinstance(status_code, int)
+        or not 100 <= status_code <= 599
+    ):
+        logger.error("Webhook handler returned an invalid status code")
+        return _json_response(500, "Invalid handler response")
+
+    return _json_response(
+        status_code,
+        response.get("body", ""),
+        response.get("headers"),
+    )
+
+
 def main(event, context):
     http = event.get("http", {}) if isinstance(event, dict) else {}
     http = http if isinstance(http, dict) else {}
@@ -80,7 +142,7 @@ def main(event, context):
     if method == "HEAD":
         return {"statusCode": 200, "body": ""}
     if method != "POST":
-        return {"statusCode": 405, "body": "Method not allowed"}
+        return _json_response(405, "Method not allowed")
 
     raw_body = _get_raw_body(event)
 
@@ -90,31 +152,31 @@ def main(event, context):
     signature = _get_header(headers, "x-hub-signature")
     if not _verify_signature(raw_body, signature, secret):
         logger.warning("Invalid or missing HMAC signature")
-        return {"statusCode": 401, "body": "Invalid signature"}
+        return _json_response(401, "Invalid signature")
 
     try:
         payload = json.loads(raw_body)
     except (json.JSONDecodeError, TypeError):
         logger.warning("Malformed JSON body")
-        return {"statusCode": 400, "body": "Malformed body"}
+        return _json_response(400, "Malformed body")
     if not isinstance(payload, dict):
         logger.warning("Webhook JSON body is not an object")
-        return {"statusCode": 400, "body": "Malformed body"}
+        return _json_response(400, "Malformed body")
 
     topic = payload.get("topic", "")
     logger.info("Received webhook topic: %s", topic)
 
     if topic in LEAD_TOPICS:
         from lead_to_user.handler import handle as handle_lead_to_user
-        return handle_lead_to_user(payload)
+        return _normalize_handler_response(handle_lead_to_user(payload))
 
     if topic in CALL_TOPICS:
         from call_timezone.handler import handle as handle_call_timezone
-        return handle_call_timezone(payload)
+        return _normalize_handler_response(handle_call_timezone(payload))
 
     if topic in SWITCH_TOPICS:
         from switch_promotion.handler import handle as handle_switch_promotion
-        return handle_switch_promotion(payload)
+        return _normalize_handler_response(handle_switch_promotion(payload))
 
     logger.info("Unhandled topic: %s", topic)
-    return {"statusCode": 200, "body": "Ignored"}
+    return _json_response(200, "Ignored")
