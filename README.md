@@ -1,7 +1,8 @@
 # Edge Serverless Functions
 
-DigitalOcean serverless functions for Edge. All Intercom webhooks are
-handled by a single `intercom/webhook` function that routes by topic.
+DigitalOcean serverless functions for Edge. General Intercom webhooks are
+handled by `intercom/webhook`; the call-to-Switch identity transition is kept
+in the isolated `intercom-switch/promote-caller` action.
 
 ## TestRail API bridge
 
@@ -276,6 +277,65 @@ doctl serverless deploy . \
 The broker package must contain only the `upload` action directory. Its tests
 live at repository-root `tests/`, outside the deployable package.
 
+## Intercom Phone Switch caller promotion
+
+`intercom-switch/promote-caller` prevents Phone Switch from creating a second
+lead for a caller. It receives only the **`call.ended`** webhook topic and
+promotes the exact call contact in place before the customer sends the first
+Switch Messenger message.
+
+The action is intentionally isolated from `intercom/webhook`. A failure or
+configuration change in this workflow cannot alter the general webhook
+router's topic handling or deploy surface.
+
+**Authorization proof and behavior:**
+
+1. Verify the webhook's HMAC-SHA1 signature over the unmodified raw body.
+2. Retrieve the authoritative Call object by the webhook's call ID.
+3. Require an inbound Intercom Phone call with exact conversation and contact
+   IDs.
+4. Retrieve that conversation and require `source.type = phone_call`, the call
+   contact still present, and a `forward_call_to_external_number` part created
+   during the exact call interval. Edge uses external call forwarding only for
+   Switch, making this the workspace's Switch-selection marker.
+5. Retrieve the exact call contact. An existing user is an idempotent no-op. If
+   a different exact-phone user already exists, leave the lead unchanged so
+   Switch can bind to that user instead of creating a second user.
+6. Otherwise, update the lead in place to `role = user`, retaining its current
+   `external_id` or receiving the deterministic
+   `edge-switch-<contact_id>` identifier when none exists.
+7. Read the contact back and require the same contact ID, `role = user`, and a
+   non-empty `external_id`. An uncertain API write returns 500 so Intercom
+   retries; the retry safely observes the already-user state if the first write
+   actually committed.
+
+Ordinary calls without the exact forwarding marker are read-only no-ops.
+Outbound calls, non-phone conversations, stale forwarding markers from an
+earlier call, contact/conversation drift, and phone conflicts cannot authorize
+promotion. Logs contain object IDs and outcomes, not phone numbers, email
+addresses, names, or upstream response bodies. Intercom may redeliver when it
+does not receive `200` within five seconds; every write and readback path is
+idempotent, so duplicate delivery is safe.
+
+Deploy only this action:
+
+```bash
+doctl serverless deploy . \
+  --remote-build \
+  --env .env \
+  --include intercom-switch/promote-caller
+```
+
+After its URL exists, configure an Intercom Developer Hub webhook subscription
+for **`call.ended`** pointing to that URL. Intercom apps expose one webhook URL
+for all topics selected on that app, so use a dedicated private app when the
+existing app's other topics must remain on `intercom/webhook`. Store the
+dedicated app's credentials in the deployment `.env` as
+`INTERCOM_SWITCH_ACCESS_TOKEN` and `INTERCOM_SWITCH_WEBHOOK_SECRET`. Grant only
+**Read conversations** and **Read and write users and companies**. The webhook
+app must use API version 2.14 or newer because `call.ended` was introduced in
+2.14.
+
 ## Webhook Handlers
 
 ### Lead-to-User Auto-Converter (DISABLED by default)
@@ -283,12 +343,13 @@ live at repository-root `tests/`, outside the deployable package.
 > ⚠️ **Server-side lead→user conversion is disabled by default and should stay
 > that way unless you understand the tradeoff below.**
 >
-> Converting a lead to a user requires Intercom's merge API, which
-> **permanently deletes the lead profile**. A customer's live Messenger session
-> is bound to the lead's Intercom contact `id` (not their email or
-> `external_id`), so the merge **orphans the session** — the next message fails
-> with "Couldn't send." Intercom confirms this is expected behaviour of merge,
-> and there is **no REST way to promote a lead to a user in place**.
+> This legacy handler uses Intercom's merge API, which **permanently deletes the
+> lead profile**. A customer's live Messenger session is bound to the lead's
+> Intercom contact `id` (not their email or `external_id`), so the merge
+> **orphans the session** — the next message fails with "Couldn't send." The
+> modern Contacts API can promote a lead in place, but Edge testing also found
+> that changing the role during an already-active Messenger session invalidates
+> that session. Blanket email-triggered conversion therefore remains disabled.
 >
 > The correct fix is **client-side**: when the person logs in / provides an
 > email, your app should call `Intercom('shutdown')` then boot with `user_id`
@@ -350,6 +411,8 @@ edge-serverless-functions/
 │   │   └── bridge/                        # Authenticated TestRail API relay
 │   ├── intercom-article-drafts/
 │   │   └── upload/                        # Authenticated draft function
+│   ├── intercom-switch/
+│   │   └── promote-caller/                # Isolated call.ended promotion
 │   └── intercom/
 │       └── webhook/                       # Single deployed function
 │           ├── __main__.py                # Router: verify sig, dispatch by topic
@@ -369,6 +432,7 @@ edge-serverless-functions/
     │   ├── test_call_timezone.py
     │   ├── test_payload.json
     │   └── serve_local.py
+    ├── test_intercom_switch_promotion.py   # Switch promotion + deploy surface
     └── test_intercom_article_drafts.py     # Draft bridge + deploy-surface tests
 ```
 
@@ -421,8 +485,9 @@ doctl serverless connect
 doctl serverless deploy . \
   --remote-build \
   --env .env \
-  --include intercom/webhook,intercom-article-drafts/upload,testrail/bridge
+  --include intercom/webhook,intercom-switch/promote-caller,intercom-article-drafts/upload,testrail/bridge
 doctl serverless functions get intercom/webhook --url
+doctl serverless functions get intercom-switch/promote-caller --url
 doctl serverless functions get intercom-article-drafts/upload --url
 doctl serverless functions get testrail/bridge --url
 ```
@@ -435,8 +500,10 @@ rely on dashboard edits; a later CLI deploy can replace them.
 
 | Variable                          | Description                              |
 |-----------------------------------|------------------------------------------|
-| `INTERCOM_ACCESS_TOKEN`           | Shared Intercom app bearer token for the webhook and draft broker; requires article read/write permission. |
-| `WEBHOOK_SECRET`                  | Intercom app client secret               |
+| `INTERCOM_ACCESS_TOKEN`           | Existing Intercom app bearer token for the general webhook and draft broker. |
+| `WEBHOOK_SECRET`                  | Client secret for the existing general Intercom webhook app. |
+| `INTERCOM_SWITCH_ACCESS_TOKEN`    | Dedicated Switch app bearer token; needs contacts read/write plus conversation read access. |
+| `INTERCOM_SWITCH_WEBHOOK_SECRET`  | Client secret for the dedicated Switch webhook app. |
 | `LEAD_TO_USER_CONVERSION_ENABLED` | Optional. Set to `true` to enable server-side lead→user merge. **Off by default** because the merge breaks live Messenger sessions (see Lead-to-User section). |
 | `INTERCOM_DRAFT_BRIDGE_SECRET`     | Random bearer secret required by the draft bridge. |
 | `INTERCOM_ARTICLE_AUTHOR_ID`       | Intercom teammate/admin ID used as the article author. |
@@ -454,6 +521,11 @@ function URL and subscribe to these topics:
 - `contact.lead.added_email`
 - `contact.email.updated`
 - `call.started`
+
+Use a dedicated private app/subscription pointing to
+`intercom-switch/promote-caller` for:
+
+- `call.ended`
 
 ## Local Development
 

@@ -24,6 +24,17 @@ packages:
         limits:
           timeout: 45000
           memory: 256
+  - name: intercom-switch
+    environment:
+      INTERCOM_ACCESS_TOKEN: ${INTERCOM_SWITCH_ACCESS_TOKEN}
+      INTERCOM_SWITCH_WEBHOOK_SECRET: ${INTERCOM_SWITCH_WEBHOOK_SECRET}
+    functions:
+      - name: promote-caller
+        runtime: python:3.12
+        web: raw
+        limits:
+          timeout: 45000
+          memory: 256
   - name: intercom
     environment:
       INTERCOM_ACCESS_TOKEN: ${INTERCOM_ACCESS_TOKEN}
