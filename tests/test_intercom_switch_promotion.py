@@ -555,7 +555,11 @@ def test_digitalocean_action_is_isolated_from_general_intercom_webhook():
     project = (PROJECT_ROOT / "project.yml").read_text(encoding="utf-8")
     assert "- name: intercom-switch" in project
     assert "- name: promote-caller" in project
-    assert "INTERCOM_ACCESS_TOKEN: ${INTERCOM_SWITCH_ACCESS_TOKEN}" in project
+    assert "INTERCOM_ACCESS_TOKEN: ${INTERCOM_ACCESS_TOKEN}" in project
+    assert "INTERCOM_SWITCH_ACCESS_TOKEN" not in project
+    assert "INTERCOM_SWITCH_ACCESS_TOKEN" not in (
+        PROJECT_ROOT / ".env.example"
+    ).read_text(encoding="utf-8")
     assert (
         "INTERCOM_SWITCH_WEBHOOK_SECRET: ${INTERCOM_SWITCH_WEBHOOK_SECRET}" in project
     )

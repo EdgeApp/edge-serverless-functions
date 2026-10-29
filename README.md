@@ -329,12 +329,13 @@ doctl serverless deploy . \
 After its URL exists, configure an Intercom Developer Hub webhook subscription
 for **`call.ended`** pointing to that URL. Intercom apps expose one webhook URL
 for all topics selected on that app, so use a dedicated private app when the
-existing app's other topics must remain on `intercom/webhook`. Store the
-dedicated app's credentials in the deployment `.env` as
-`INTERCOM_SWITCH_ACCESS_TOKEN` and `INTERCOM_SWITCH_WEBHOOK_SECRET`. Grant only
-**Read conversations** and **Read and write users and companies**. The webhook
-app must use API version 2.14 or newer because `call.ended` was introduced in
-2.14.
+existing app's other topics must remain on `intercom/webhook`. The function
+reuses the existing `INTERCOM_ACCESS_TOKEN` for API calls; confirm that token
+has **Read conversations** and **Read and write users and companies**. Store
+only the dedicated webhook app's client secret in the deployment `.env` as
+`INTERCOM_SWITCH_WEBHOOK_SECRET`. Its access token is not used by this action.
+The webhook app must use API version 2.14 or newer because `call.ended` was
+introduced in 2.14.
 
 ## Webhook Handlers
 
@@ -500,9 +501,8 @@ rely on dashboard edits; a later CLI deploy can replace them.
 
 | Variable                          | Description                              |
 |-----------------------------------|------------------------------------------|
-| `INTERCOM_ACCESS_TOKEN`           | Existing Intercom app bearer token for the general webhook and draft broker. |
+| `INTERCOM_ACCESS_TOKEN`           | Existing Intercom app bearer token shared by the general webhook, draft broker, and Switch caller promotion action. |
 | `WEBHOOK_SECRET`                  | Client secret for the existing general Intercom webhook app. |
-| `INTERCOM_SWITCH_ACCESS_TOKEN`    | Dedicated Switch app bearer token; needs contacts read/write plus conversation read access. |
 | `INTERCOM_SWITCH_WEBHOOK_SECRET`  | Client secret for the dedicated Switch webhook app. |
 | `LEAD_TO_USER_CONVERSION_ENABLED` | Optional. Set to `true` to enable server-side lead→user merge. **Off by default** because the merge breaks live Messenger sessions (see Lead-to-User section). |
 | `INTERCOM_DRAFT_BRIDGE_SECRET`     | Random bearer secret required by the draft bridge. |
