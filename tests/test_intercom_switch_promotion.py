@@ -1,6 +1,3 @@
-import base64
-import hashlib
-import hmac
 import importlib.util
 import json
 import sys
@@ -11,16 +8,17 @@ import pytest
 import requests
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-FUNCTION_DIR = PROJECT_ROOT / "packages" / "intercom-switch" / "promote-caller"
+FUNCTION_DIR = (
+    PROJECT_ROOT / "packages" / "intercom" / "webhook" / "switch_promotion"
+)
 
 spec = importlib.util.spec_from_file_location(
-    "intercom_switch_promote_caller", FUNCTION_DIR / "__main__.py"
+    "intercom_switch_promotion", FUNCTION_DIR / "handler.py"
 )
 switch = importlib.util.module_from_spec(spec)
-sys.modules["intercom_switch_promote_caller"] = switch
+sys.modules["intercom_switch_promotion"] = switch
 spec.loader.exec_module(switch)
 
-WEBHOOK_SECRET = "switch-test-secret"
 ACCESS_TOKEN = "switch-test-token"
 
 
@@ -39,33 +37,6 @@ def _payload(topic="call.ended", call_id="call_123"):
                 "direction": "inbound",
             },
         },
-    }
-
-
-def _signature(body, secret=WEBHOOK_SECRET):
-    digest = hmac.new(
-        secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha1
-    ).hexdigest()
-    return f"sha1={digest}"
-
-
-def _event(payload=None, *, method="POST", base64_encoded=False, signature=None):
-    body = json.dumps(payload if payload is not None else _payload())
-    encoded_body = (
-        base64.b64encode(body.encode("utf-8")).decode("ascii")
-        if base64_encoded
-        else body
-    )
-    return {
-        "http": {
-            "method": method,
-            "headers": {
-                "Content-Type": "application/json",
-                "X-Hub-Signature": signature or _signature(body),
-            },
-            "body": encoded_body,
-            "isBase64Encoded": base64_encoded,
-        }
     }
 
 
@@ -125,75 +96,38 @@ def _outcome(result):
 
 @pytest.fixture(autouse=True)
 def _environment(monkeypatch):
-    monkeypatch.setenv("INTERCOM_SWITCH_WEBHOOK_SECRET", WEBHOOK_SECRET)
     monkeypatch.setenv("INTERCOM_ACCESS_TOKEN", ACCESS_TOKEN)
 
 
-class TestWebhookBoundary:
-    def test_valid_signed_call_ended_dispatches(self):
+class TestHandlerBoundary:
+    def test_call_ended_dispatches(self):
         with patch.object(
             switch, "_handle_call_ended", return_value="promoted"
         ) as handle:
-            result = switch.main(_event(), None)
+            result = switch.handle(_payload())
 
         assert result["statusCode"] == 200
         assert _outcome(result) == "promoted"
         handle.assert_called_once()
         assert handle.call_args.args[0]["id"] == "call_123"
 
-    def test_base64_body_and_case_insensitive_header_are_accepted(self):
-        with patch.object(switch, "_handle_call_ended", return_value="already_user"):
-            result = switch.main(_event(base64_encoded=True), None)
-
-        assert result["statusCode"] == 200
-        assert _outcome(result) == "already_user"
-
-    def test_invalid_signature_is_rejected_before_dispatch(self):
-        with patch.object(switch, "_handle_call_ended") as handle:
-            result = switch.main(_event(signature="sha1=wrong"), None)
-
-        assert result["statusCode"] == 401
-        assert _outcome(result) == "invalid_signature"
-        handle.assert_not_called()
-
     def test_malformed_call_id_is_rejected_before_api_read(self):
         with patch.object(switch, "_get_call") as get_call:
-            result = switch.main(_event(_payload(call_id="../contacts/victim")), None)
+            result = switch.handle(_payload(call_id="../contacts/victim"))
 
         assert result["statusCode"] == 200
         assert _outcome(result) == "skipped_missing_call_id"
         get_call.assert_not_called()
 
-    def test_missing_secret_fails_closed(self, monkeypatch):
-        monkeypatch.delenv("INTERCOM_SWITCH_WEBHOOK_SECRET")
-        result = switch.main(_event(), None)
-        assert result["statusCode"] == 401
-
-    def test_head_is_non_mutating_health_response(self):
-        result = switch.main({"http": {"method": "HEAD"}}, None)
-        assert result == {"statusCode": 200, "body": ""}
-
-    def test_non_post_method_is_rejected(self):
-        result = switch.main({"http": {"method": "GET"}}, None)
-        assert result["statusCode"] == 405
-        assert _outcome(result) == "method_not_allowed"
-
-    def test_malformed_json_is_rejected_after_signature_check(self):
-        raw = "{not-json"
-        event = {
-            "http": {
-                "method": "POST",
-                "headers": {"x-hub-signature": _signature(raw)},
-                "body": raw,
-                "isBase64Encoded": False,
-            }
-        }
-        result = switch.main(event, None)
-        assert result["statusCode"] == 400
-        assert _outcome(result) == "malformed_body"
+    def test_missing_call_item_is_ignored(self):
+        payload = _payload()
+        payload["data"]["item"] = None
+        result = switch.handle(payload)
+        assert result["statusCode"] == 200
+        assert _outcome(result) == "skipped_missing_call"
 
     def test_other_topics_are_ignored(self):
-        result = switch.main(_event(_payload(topic="call.started")), None)
+        result = switch.handle(_payload(topic="call.started"))
         assert result["statusCode"] == 200
         assert _outcome(result) == "ignored_topic"
 
@@ -201,7 +135,7 @@ class TestWebhookBoundary:
         with patch.object(
             switch, "_handle_call_ended", side_effect=switch.IntercomError("boom")
         ):
-            result = switch.main(_event(), None)
+            result = switch.handle(_payload())
 
         assert result["statusCode"] == 500
         assert _outcome(result) == "retry_required"
@@ -551,18 +485,21 @@ class TestIntercomClient:
         assert "private customer data" not in str(error.value)
 
 
-def test_digitalocean_action_is_isolated_from_general_intercom_webhook():
+def test_switch_handler_uses_existing_intercom_webhook_action():
     project = (PROJECT_ROOT / "project.yml").read_text(encoding="utf-8")
-    assert "- name: intercom-switch" in project
-    assert "- name: promote-caller" in project
     assert "INTERCOM_ACCESS_TOKEN: ${INTERCOM_ACCESS_TOKEN}" in project
     assert "INTERCOM_SWITCH_ACCESS_TOKEN" not in project
-    assert "INTERCOM_SWITCH_ACCESS_TOKEN" not in (
-        PROJECT_ROOT / ".env.example"
-    ).read_text(encoding="utf-8")
-    assert (
-        "INTERCOM_SWITCH_WEBHOOK_SECRET: ${INTERCOM_SWITCH_WEBHOOK_SECRET}" in project
-    )
-    assert "packages/intercom-switch/promote-caller" not in (
+    assert "INTERCOM_SWITCH_WEBHOOK_SECRET" not in project
+    assert "- name: intercom-switch" not in project
+    assert "timeout: 45000" in project
+    assert "call.ended" in (
         PROJECT_ROOT / "packages" / "intercom" / "webhook" / "__main__.py"
     ).read_text(encoding="utf-8")
+    assert (
+        PROJECT_ROOT
+        / "packages"
+        / "intercom"
+        / "webhook"
+        / "switch_promotion"
+        / "handler.py"
+    ).is_file()

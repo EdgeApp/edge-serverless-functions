@@ -3,9 +3,9 @@ import hashlib
 import hmac
 import importlib.util
 import json
-from pathlib import Path
 import sys
-from unittest.mock import patch, MagicMock
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -186,6 +186,31 @@ class TestSignatureVerification:
             result = handler.main(event, None)
         assert result["statusCode"] == 200
 
+    def test_header_name_is_case_insensitive(self):
+        event = _make_event(_make_payload(topic="conversation.created"))
+        signature = event["http"]["headers"].pop("x-hub-signature")
+        event["http"]["headers"]["X-Hub-Signature"] = signature
+
+        result = handler.main(event, None)
+
+        assert result == {"statusCode": 200, "body": "Ignored"}
+
+    def test_missing_secret_fails_closed(self, monkeypatch):
+        monkeypatch.delenv("WEBHOOK_SECRET")
+        event = _make_event(_make_payload(topic="conversation.created"))
+
+        result = handler.main(event, None)
+
+        assert result["statusCode"] == 401
+
+    def test_non_post_method_is_rejected(self):
+        event = _make_event(_make_payload(topic="conversation.created"))
+        event["http"]["method"] = "GET"
+
+        result = handler.main(event, None)
+
+        assert result == {"statusCode": 405, "body": "Method not allowed"}
+
 
 # ── Topic routing ───────────────────────────────────────────────────
 
@@ -239,6 +264,20 @@ class TestTopicRouting:
             result = handler.main(event, None)
         assert result["statusCode"] == 200
         assert result["body"] == "OK"
+
+    def test_call_ended_topic_dispatches_to_switch_handler(self):
+        payload = _make_payload(topic="call.ended")
+        payload["data"]["item"] = {"type": "call", "id": "call_123"}
+        event = _make_event(payload)
+        expected = {"statusCode": 200, "body": '{"outcome":"promoted"}'}
+
+        with patch(
+            "switch_promotion.handler.handle", return_value=expected
+        ) as handle_switch:
+            result = handler.main(event, None)
+
+        assert result == expected
+        handle_switch.assert_called_once_with(payload)
 
 
 # ── Lead routing ────────────────────────────────────────────────────
@@ -584,7 +623,7 @@ class TestIntercomClient:
     def test_create_user_sends_correct_payload(self):
         with patch("intercom_client.requests.post") as mock_post:
             mock_post.return_value = _mock_create("u1", "test@test.com")
-            user = intercom_client.create_user("test@test.com", name="Test")
+            intercom_client.create_user("test@test.com", name="Test")
         call_json = mock_post.call_args[1]["json"]
         assert call_json == {"role": "user", "email": "test@test.com", "name": "Test"}
 
