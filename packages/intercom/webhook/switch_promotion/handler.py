@@ -1,22 +1,19 @@
-"""Promote Intercom Phone callers before their Switch Messenger session starts.
+"""Promote Intercom Phone callers before their Switch session starts.
 
-This action receives only ``call.ended`` webhooks.  For an inbound phone call,
-it fetches the authoritative Call and Conversation objects, proves that the
-exact call was forwarded externally during its active interval, and promotes
-the call's attached lead to a user in place.  Edge uses external call
-forwarding only for Phone Switch, so that conversation part is the workspace's
-Switch-selection marker.
+The shared webhook router verifies the request and dispatches only
+``call.ended`` payloads here. For an inbound phone call, this handler fetches
+the authoritative Call and Conversation objects, proves that the exact call
+was forwarded externally during its active interval, and promotes the call's
+attached lead to a user in place. Edge uses external call forwarding only for
+Phone Switch, so that conversation part is the workspace's Switch-selection
+marker.
 
-The action deliberately lives outside the general Intercom webhook router.  A
-failure after a possibly committed write returns 500; Intercom's retry then
+A failure after a possibly committed write returns 500; Intercom's retry then
 re-reads the contact and safely observes the already-user state.
 """
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
 import json
 import logging
 import os
@@ -26,7 +23,6 @@ from typing import Any
 import requests
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 API_BASE = "https://api.intercom.io"
 API_VERSION = "2.17"
@@ -52,43 +48,6 @@ def _response(status_code: int, outcome: str) -> dict[str, Any]:
             separators=(",", ":"),
         ),
     }
-
-
-def _raw_body(event: dict[str, Any]) -> str:
-    http = event.get("http")
-    if not isinstance(http, dict):
-        return ""
-    body = http.get("body", "")
-    if not isinstance(body, str):
-        return ""
-    if http.get("isBase64Encoded"):
-        try:
-            return base64.b64decode(body, validate=True).decode("utf-8")
-        except (ValueError, UnicodeDecodeError):
-            return ""
-    return body
-
-
-def _header(event: dict[str, Any], name: str) -> str:
-    http = event.get("http")
-    headers = http.get("headers") if isinstance(http, dict) else None
-    if not isinstance(headers, dict):
-        return ""
-    wanted = name.casefold()
-    for key, value in headers.items():
-        if isinstance(key, str) and key.casefold() == wanted and isinstance(value, str):
-            return value
-    return ""
-
-
-def _valid_signature(raw_body: str, signature: str, secret: str) -> bool:
-    if not raw_body or not signature or not secret:
-        return False
-    expected = hmac.new(
-        secret.encode("utf-8"), raw_body.encode("utf-8"), hashlib.sha1
-    ).hexdigest()
-    provided = signature.removeprefix("sha1=")
-    return hmac.compare_digest(expected, provided)
 
 
 def _api_headers() -> dict[str, str]:
@@ -326,33 +285,10 @@ def _handle_call_ended(item: dict[str, Any]) -> str:
     return "promoted"
 
 
-def main(event: dict[str, Any], context: Any) -> dict[str, Any]:
-    """DigitalOcean Functions entry point."""
-    del context
-    http = event.get("http")
-    method = http.get("method", "").upper() if isinstance(http, dict) else ""
-    if method == "HEAD":
-        return {"statusCode": 200, "body": ""}
-    if method != "POST":
-        return _response(405, "method_not_allowed")
-
-    raw_body = _raw_body(event)
-    secret = os.environ.get("INTERCOM_SWITCH_WEBHOOK_SECRET", "")
-    signature = _header(event, "x-hub-signature")
-    if not _valid_signature(raw_body, signature, secret):
-        logger.warning("Rejected Switch promotion webhook: invalid signature")
-        return _response(401, "invalid_signature")
-
-    try:
-        payload = json.loads(raw_body)
-    except (TypeError, json.JSONDecodeError):
-        return _response(400, "malformed_body")
-    if not isinstance(payload, dict):
-        return _response(400, "malformed_body")
-
-    topic = payload.get("topic")
-    if topic != EXPECTED_TOPIC:
-        logger.info("Ignored webhook topic %r", topic)
+def handle(payload: dict[str, Any]) -> dict[str, Any]:
+    """Handle one signature-verified ``call.ended`` webhook payload."""
+    if payload.get("topic") != EXPECTED_TOPIC:
+        logger.info("Ignored Switch promotion topic %r", payload.get("topic"))
         return _response(200, "ignored_topic")
 
     data = payload.get("data")

@@ -1,8 +1,8 @@
 # Edge Serverless Functions
 
 DigitalOcean serverless functions for Edge. General Intercom webhooks are
-handled by `intercom/webhook`; the call-to-Switch identity transition is kept
-in the isolated `intercom-switch/promote-caller` action.
+handled by `intercom/webhook`; the call-to-Switch identity transition has its
+own isolated handler within that existing action.
 
 ## TestRail API bridge
 
@@ -279,14 +279,15 @@ live at repository-root `tests/`, outside the deployable package.
 
 ## Intercom Phone Switch caller promotion
 
-`intercom-switch/promote-caller` prevents Phone Switch from creating a second
-lead for a caller. It receives only the **`call.ended`** webhook topic and
-promotes the exact call contact in place before the customer sends the first
-Switch Messenger message.
+The `switch_promotion` handler prevents Phone Switch from creating a second lead
+for a caller. It receives only the **`call.ended`** webhook topic from the
+existing `intercom/webhook` router and promotes the exact call contact in place
+before the customer sends the first Switch Messenger message.
 
-The action is intentionally isolated from `intercom/webhook`. A failure or
-configuration change in this workflow cannot alter the general webhook
-router's topic handling or deploy surface.
+The policy and mutation code is isolated from the other handlers. The shared
+router only verifies the existing integration's webhook signature and
+dispatches the exact topic. No second Intercom integration, webhook URL, access
+token, or signing secret is required.
 
 **Authorization proof and behavior:**
 
@@ -317,24 +318,21 @@ addresses, names, or upstream response bodies. Intercom may redeliver when it
 does not receive `200` within five seconds; every write and readback path is
 idempotent, so duplicate delivery is safe.
 
-Deploy only this action:
+Deploy the existing Intercom webhook action:
 
 ```bash
 doctl serverless deploy . \
   --remote-build \
   --env .env \
-  --include intercom-switch/promote-caller
+  --include intercom/webhook
 ```
 
-After its URL exists, configure an Intercom Developer Hub webhook subscription
-for **`call.ended`** pointing to that URL. Intercom apps expose one webhook URL
-for all topics selected on that app, so use a dedicated private app when the
-existing app's other topics must remain on `intercom/webhook`. Store the
-dedicated app's credentials in the deployment `.env` as
-`INTERCOM_SWITCH_ACCESS_TOKEN` and `INTERCOM_SWITCH_WEBHOOK_SECRET`. Grant only
-**Read conversations** and **Read and write users and companies**. The webhook
-app must use API version 2.14 or newer because `call.ended` was introduced in
-2.14.
+In the existing Intercom Developer Hub integration that already points to
+`intercom/webhook`, add the **`call.ended`** topic. Keep the existing endpoint,
+`INTERCOM_ACCESS_TOKEN`, and `WEBHOOK_SECRET`. Confirm that the existing token
+has **Read conversations** and **Read and write users and companies**. The
+integration must use API version 2.14 or newer because `call.ended` was
+introduced in 2.14.
 
 ## Webhook Handlers
 
@@ -411,8 +409,6 @@ edge-serverless-functions/
 │   │   └── bridge/                        # Authenticated TestRail API relay
 │   ├── intercom-article-drafts/
 │   │   └── upload/                        # Authenticated draft function
-│   ├── intercom-switch/
-│   │   └── promote-caller/                # Isolated call.ended promotion
 │   └── intercom/
 │       └── webhook/                       # Single deployed function
 │           ├── __main__.py                # Router: verify sig, dispatch by topic
@@ -422,10 +418,13 @@ edge-serverless-functions/
 │           ├── lead_to_user/              # Lead-to-user handler
 │           │   ├── __init__.py
 │           │   └── handler.py
-│           └── call_timezone/             # Call timezone handler
+│           ├── call_timezone/             # Call timezone handler
+│           │   ├── __init__.py
+│           │   ├── handler.py
+│           │   └── timezone.py            # Phone → timezone inference
+│           └── switch_promotion/          # Isolated call.ended policy
 │               ├── __init__.py
-│               ├── handler.py
-│               └── timezone.py            # Phone → timezone inference
+│               └── handler.py
 └── tests/
     ├── intercom/                           # Webhook tests and local harness
     │   ├── test_webhook.py
@@ -485,9 +484,8 @@ doctl serverless connect
 doctl serverless deploy . \
   --remote-build \
   --env .env \
-  --include intercom/webhook,intercom-switch/promote-caller,intercom-article-drafts/upload,testrail/bridge
+  --include intercom/webhook,intercom-article-drafts/upload,testrail/bridge
 doctl serverless functions get intercom/webhook --url
-doctl serverless functions get intercom-switch/promote-caller --url
 doctl serverless functions get intercom-article-drafts/upload --url
 doctl serverless functions get testrail/bridge --url
 ```
@@ -500,10 +498,8 @@ rely on dashboard edits; a later CLI deploy can replace them.
 
 | Variable                          | Description                              |
 |-----------------------------------|------------------------------------------|
-| `INTERCOM_ACCESS_TOKEN`           | Existing Intercom app bearer token for the general webhook and draft broker. |
+| `INTERCOM_ACCESS_TOKEN`           | Existing Intercom app bearer token shared by the general webhook, draft broker, and Switch caller promotion action. |
 | `WEBHOOK_SECRET`                  | Client secret for the existing general Intercom webhook app. |
-| `INTERCOM_SWITCH_ACCESS_TOKEN`    | Dedicated Switch app bearer token; needs contacts read/write plus conversation read access. |
-| `INTERCOM_SWITCH_WEBHOOK_SECRET`  | Client secret for the dedicated Switch webhook app. |
 | `LEAD_TO_USER_CONVERSION_ENABLED` | Optional. Set to `true` to enable server-side lead→user merge. **Off by default** because the merge breaks live Messenger sessions (see Lead-to-User section). |
 | `INTERCOM_DRAFT_BRIDGE_SECRET`     | Random bearer secret required by the draft bridge. |
 | `INTERCOM_ARTICLE_AUTHOR_ID`       | Intercom teammate/admin ID used as the article author. |
@@ -521,10 +517,6 @@ function URL and subscribe to these topics:
 - `contact.lead.added_email`
 - `contact.email.updated`
 - `call.started`
-
-Use a dedicated private app/subscription pointing to
-`intercom-switch/promote-caller` for:
-
 - `call.ended`
 
 ## Local Development
