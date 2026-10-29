@@ -82,13 +82,26 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         status = result.get("statusCode", 200)
         body = result.get("body", "")
-        if isinstance(body, dict):
-            body = json.dumps(body)
+        if isinstance(body, (dict, list)):
+            body = json.dumps(body, separators=(",", ":"))
+
+        response_headers = result.get("headers", {})
+        response_headers = (
+            response_headers if isinstance(response_headers, dict) else {}
+        )
+        content_type = next(
+            (
+                value
+                for key, value in response_headers.items()
+                if isinstance(key, str) and key.casefold() == "content-type"
+            ),
+            "text/plain",
+        )
 
         print(f"  → Response: {status} {body}\n")
 
         self.send_response(status)
-        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Type", content_type)
         self.end_headers()
         self.wfile.write(body.encode("utf-8"))
 
@@ -116,6 +129,7 @@ def run(port=8080):
     print("Handles all topics via the unified router:")
     print("  - contact.lead.created, contact.lead.added_email, contact.email.updated")
     print("  - call.started")
+    print("  - call.ended")
     print()
     print("Next steps:")
     print(f"  1. In another terminal: ngrok http {port}")

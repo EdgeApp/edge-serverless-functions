@@ -66,6 +66,7 @@ def _make_event(payload_dict, secret=WEBHOOK_SECRET, signature_override=None, ra
         "http": {
             "method": "POST",
             "headers": {
+                "accept": "application/json",
                 "content-type": "application/json",
                 "x-hub-signature": sig,
             },
@@ -83,6 +84,7 @@ def _make_event_base64(payload_dict, secret=WEBHOOK_SECRET):
         "http": {
             "method": "POST",
             "headers": {
+                "accept": "application/json",
                 "content-type": "application/json",
                 "x-hub-signature": sig,
             },
@@ -277,14 +279,14 @@ class TestWebhookFiltering:
         event = _make_event(payload)
         result = handler.main(event, None)
         assert result["statusCode"] == 200
-        assert result["body"] == "Ignored"
+        assert result["body"] == {"message": "Ignored"}
 
     def test_outbound_call_skipped(self):
         payload = _make_call_payload(direction="outbound")
         event = _make_event(payload)
         result = handler.main(event, None)
         assert result["statusCode"] == 200
-        assert "Skipped" in result["body"]
+        assert "Skipped" in result["body"]["message"]
 
     def test_missing_phone_skipped(self):
         payload = _make_call_payload()
@@ -293,7 +295,7 @@ class TestWebhookFiltering:
         event = _make_event(payload, raw_body_override=raw_body)
         result = handler.main(event, None)
         assert result["statusCode"] == 200
-        assert "Skipped" in result["body"]
+        assert "Skipped" in result["body"]["message"]
 
     def test_missing_contact_id_skipped(self):
         payload = _make_call_payload()
@@ -302,7 +304,7 @@ class TestWebhookFiltering:
         event = _make_event(payload, raw_body_override=raw_body)
         result = handler.main(event, None)
         assert result["statusCode"] == 200
-        assert "Skipped" in result["body"]
+        assert "Skipped" in result["body"]["message"]
 
     def test_malformed_body_returns_400(self):
         raw_body = "not-json{"
@@ -335,7 +337,7 @@ class TestHandlerFlow:
             result = handler.main(event, None)
 
         assert result["statusCode"] == 200
-        assert result["body"] == "OK"
+        assert result["body"] == {"message": "OK"}
 
         assert mock_post.call_count == 1
         note_call = mock_post.call_args
@@ -393,7 +395,11 @@ class TestHandlerFlow:
         ) as mock_update:
             result = handler.main(event, None)
 
-        assert result == {"statusCode": 500, "body": "Call note requires retry"}
+        assert result == {
+            "statusCode": 500,
+            "headers": {"Content-Type": "application/json"},
+            "body": {"message": "Call note requires retry"},
+        }
         assert mock_update.call_count == 1
 
     def test_one_minute_retry_skips_note_when_receipt_exists(self):
@@ -409,7 +415,11 @@ class TestHandlerFlow:
         ) as mock_update:
             result = handler.main(event, None)
 
-        assert result == {"statusCode": 200, "body": "OK"}
+        assert result == {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": {"message": "OK"},
+        }
         mock_note.assert_not_called()
         assert mock_update.call_count == 1
 
@@ -427,7 +437,11 @@ class TestHandlerFlow:
         ):
             result = handler.main(event, None)
 
-        assert result == {"statusCode": 200, "body": "OK"}
+        assert result == {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": {"message": "OK"},
+        }
         assert mock_note.call_count == 1
         assert "call_123" in mock_note.call_args.args[1]
 
@@ -443,7 +457,11 @@ class TestHandlerFlow:
         ) as mock_update:
             result = handler.main(event, None)
 
-        assert result == {"statusCode": 500, "body": "Call note requires retry"}
+        assert result == {
+            "statusCode": 500,
+            "headers": {"Content-Type": "application/json"},
+            "body": {"message": "Call note requires retry"},
+        }
         mock_note.assert_not_called()
         assert mock_update.call_count == 1
 
@@ -459,7 +477,11 @@ class TestHandlerFlow:
         ), patch("call_timezone.handler.update_contact_attributes"):
             result = handler.main(event, None)
 
-        assert result == {"statusCode": 200, "body": "OK"}
+        assert result == {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": {"message": "OK"},
+        }
 
     def test_missing_call_id_skips_note_but_updates_attribute(self):
         event = _make_event(_make_call_payload(call_id=None))
@@ -470,7 +492,11 @@ class TestHandlerFlow:
         ) as mock_update:
             result = handler.main(event, None)
 
-        assert result == {"statusCode": 200, "body": "OK"}
+        assert result == {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": {"message": "OK"},
+        }
         mock_note.assert_not_called()
         assert mock_update.call_count == 1
 
